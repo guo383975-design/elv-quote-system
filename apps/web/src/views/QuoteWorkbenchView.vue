@@ -26,7 +26,7 @@ import QuotaPickerDialog from '@/components/QuotaPickerDialog.vue'
 import ApplyPointTemplateDialog from '@/components/ApplyPointTemplateDialog.vue'
 import InquiryImportDialog from '@/components/InquiryImportDialog.vue'
 import QuoteItemDialog from '@/components/QuoteItemDialog.vue'
-import { deviceApi, projectApi, quoteApi, laborApi } from '@/api'
+import { deviceApi, projectApi, quoteApi, laborApi, settingApi } from '@/api'
 import { extractErrorMessage } from '@/api/client'
 import type {
   AuditLog,
@@ -42,6 +42,13 @@ import type {
   ApprovalChain,
 } from '@/api/types'
 import { dateTime, money, percentInputToRatio, ratioToPercentInput, toNum } from '@/utils/format'
+import {
+  effectiveValidDays,
+  formatLocalDate,
+  validityHint,
+  validityInfo,
+  validityTagType,
+} from '@/utils/quoteValidity'
 import { useAuthStore } from '@/stores/auth'
 import { useMetaStore } from '@/stores/meta'
 
@@ -140,6 +147,10 @@ function syncRatesFromQuote(q: QuoteDetail): void {
 // ----- 权限与状态机（沿用旧编辑器的口径）-----
 const quoteStatus = computed(() => String(quote.value?.status ?? 'draft'))
 const locked = computed(() => ['approved', 'archived'].includes(quoteStatus.value))
+/** 已归档（2026-10-08 用户反馈 ✓）：归档是**终态**，界面要整单只读 ✓
+ *  （后端已经做到了：归档单改内容 → 409 ✓、改状态 → 422 ✓，缺的是界面只读 ✗）。
+ *  approved 不走这一支 ✗ —— 批准单允许有权限的人退回草稿，那是既有审批流程 ✓。 */
+const archived = computed(() => quoteStatus.value === 'archived')
 const canEdit = computed(() => auth.canWrite && !locked.value)
 const canApprove = computed(() => auth.can('quote', 'approve'))
 const canSeeAudit = computed(() => auth.can('audit_log', 'read'))
@@ -154,6 +165,11 @@ const statusChanging = ref(false)
 
 async function changeStatus(next: string, label: string, confirmText?: string): Promise<void> {
   if (!quote.value) return
+  // 归档是终态 ✓（后端改状态 422 ✓）：界面不再给入口 ✓，这里再兜一层 ✓
+  if (archived.value) {
+    ElMessage.warning('本单已归档，不可修改；如需增项请新建关联本单的报价单')
+    return
+  }
   if (confirmText) {
     const go = await ElMessageBox.confirm(confirmText, label, {
       confirmButtonText: label,
@@ -185,6 +201,70 @@ function onStatusCommand(cmd: string): void {
     void changeStatus('draft', '退回草稿', '退回草稿后这张单可以继续修改。确认退回？')
   }
 }
+
+// ----- 本单有效期（2026-10-08 用户反馈：进单后看不到「本单有效期」✗）-----
+//  天数来源（按优先级 ✓）：
+//    ① 后端 `GET /quotes/{id}/export-clauses` 的 valid_days ✓ —— 与客户版预览/PDF **完全同源** ✓，
+//       且不依赖 `setting:read` 权限 ✓（销售/采购角色也拿得到 ✓）；
+//    ② 拿不到就退回前端取值链 ✓（复用 utils/quoteValidity 的纯函数 ✗ 不另写一套 ✓）：
+//         terms_override.valid_days → valid_days_override → 系统设置 quote.valid_days → 30
+//  ⚠ 系统设置那一档要 `setting:read`（销售/采购没有 ✗）：先判权限再发请求 ✓，
+//    拿不到就落到兜底值 ✓ —— 不会因为"读不到设置"就让页面报错，也不会平白弹 403 警告 ✓。
+const validDaysFromApi = ref<number | null>(null)
+const settingsValidDays = ref<number | null>(null)
+
+async function loadValidDays(): Promise<void> {
+  try {
+    const d = await quoteApi.exportClauses(quoteId.value)
+    validDaysFromApi.value = d.valid_days ?? null
+  } catch {
+    validDaysFromApi.value = null
+  }
+}
+
+async function loadSettingsValidDays(): Promise<void> {
+  if (!auth.can('setting', 'read')) return
+  try {
+    const s = await settingApi.get()
+    settingsValidDays.value = s.quote?.valid_days ?? null
+  } catch {
+    settingsValidDays.value = null   // 可接受降级：退回 terms_override / 30 天 ✓
+  }
+}
+
+/**
+ * 报价日期（有效期起点）→ 交给纯函数时用的**本地** ISO 串。
+ *
+ * 为什么不用 `new Date(created_at)` 直接算：`created_at` 带 Z（UTC）✓，而
+ *   后端 export_data._quote_date 走的是 `created_at.astimezone()` —— **服务器本地**日期 ✓，
+ *   本部署服务器 TZ = UTC（实测 `timedatectl`：UTC）✗，浏览器却在 +08:00 ✗
+ *   → 对「本地凌晨建的单」会与导出件/客户版差一天 ✗
+ *   （实测探针 Q01：本地 10-08 vs 导出 10-07 ✗）。
+ * 所以这里取 created_at 那一瞬在 **UTC 日历**上的日期 ✓（与后端在 UTC 服务器上的结果一致 ✓），
+ *   再当成本地 00:00 交给 validityInfo ✓；「剩余天数」仍按浏览器本地今天算 ✓。
+ * ⚠ 只转这一次 ✗ —— 不要对结果再 getTimezoneOffset 一次（那才是"双重换算" ✗）。
+ */
+function quoteStartIso(createdAt: string | null | undefined): string | null {
+  if (!createdAt) return null
+  const d = new Date(createdAt)
+  if (Number.isNaN(d.getTime())) return null
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}T00:00:00`
+}
+
+const validity = computed(() => {
+  const q = quote.value
+  if (!q) return null
+  // ① 后端权威口径（与 PDF/预览同源 ✓）→ ② 前端取值链兜底 ✓
+  const days = validDaysFromApi.value ?? effectiveValidDays(q, settingsValidDays.value)
+  return validityInfo(quoteStartIso(q.created_at), days)
+})
+
+/** 悬浮算式（报价日期 + 天数 = 有效期至）—— 便于和导出件/客户核对 ✓ */
+const validityTip = computed(() => {
+  const q = quote.value
+  return validity.value && q ? validityHint(quoteStartIso(q.created_at), validity.value) : ''
+})
 
 // ----- 数据加载 -----
 async function reload(): Promise<void> {
@@ -348,7 +428,7 @@ async function decide(decision: 'approved' | 'rejected'): Promise<void> {
 }
 
 onMounted(async () => {
-  await Promise.all([meta.load(), reload(), loadDeviceTotal()])
+  await Promise.all([meta.load(), reload(), loadDeviceTotal(), loadValidDays(), loadSettingsValidDays()])
   await loadApproval()
 })
 
@@ -791,6 +871,7 @@ function onRateChange(): void {
 }
 
 async function saveAndCompute(): Promise<void> {
+  if (!canEdit.value) return
   computing.value = true
   try {
     const res = await quoteApi.compute(quoteId.value, ratePayload())
@@ -940,6 +1021,11 @@ const clausesPreview = computed(() =>
 
 async function saveClauses(): Promise<void> {
   if (!quoteId.value) return
+  // 归档 = 终态 ✓（后端 409 ✓）：条款弹窗里的保存也要挡住 ✓（不只是置灰按钮 ✓）
+  if (!canEdit.value) {
+    ElMessage.warning('本单已锁定（已批准/已归档），不能改条款')
+    return
+  }
   clausesSaving.value = true
   try {
     // 只把**改动过的**数字写成本单覆盖 ✓（没改的继承系统设置 ✓，避免把默认值固化成死数 ✓）
@@ -1042,27 +1128,38 @@ function openQuotaPicker(row: { id: string; notes?: string | null }): void {
 
 /** 选中定额 → 写备注 → 收尾（定额人工费就是靠这个备注触发的 ✓） */
 async function onQuotaPicked(q: { code: string; name?: string }): Promise<void> {
+  if (!canEdit.value) return
   const row = quotaTarget.value
   if (!row) return
   const parentId = (row as { parent_item_id?: string | null }).parent_item_id
   // 定额模式 + 点的是**主设备行** → 建一条定额子目行 ✓（广联达式 ✓）
   //   子目的钱走**既有** install_unit_price（= 定额基价 ✓）→ 后端零改动 ✓
+  //   ⚠ 已经有子目行时**改那一条** ✗ 不再加一条（否则安装费翻倍 ✗）
   if (installMode.value === 'quota' && !parentId) {
     const base = Number((q as { base_price?: string | number }).base_price ?? 0)
     const parent = visibleTree.value.find((r) => String(r.id) === String(row.id)) as
       | { quantity?: unknown }
       | undefined
     const qty = Number(parent?.quantity ?? 1)
-    await quoteApi.addItem(quoteId.value, {
+    const payload = {
       name: q.name ? `${q.code} ${q.name}` : q.code,
       unit: (q as { unit?: string }).unit || '项',
       quantity: qty,
-      unit_price: 0,
       install_unit_price: base,
       notes: `quota:${q.code}`,
-      parent_item_id: String(row.id),
-    } as never)
-    ElMessage.success(`已加定额子目 ${q.code}（工程量默认 ${qty} ✓ 可单独改 ✓）`)
+    }
+    const exist = quotaChildren(row)
+    if (exist.length) {
+      await quoteApi.updateItem(quoteId.value, exist[0].id, payload as never)
+      ElMessage.success(`已改定额子目为 ${q.code}（安装单价 ${base} ✓）`)
+    } else {
+      await quoteApi.addItem(quoteId.value, {
+        ...payload,
+        unit_price: 0,
+        parent_item_id: String(row.id),
+      } as never)
+      ElMessage.success(`已加定额子目 ${q.code}（工程量默认 ${qty} ✓ 可单独改 ✓）`)
+    }
   } else {
     await quoteApi.updateItem(quoteId.value, row.id, installMode.value === 'quota'
       ? { notes: withQuota(row.notes, q.code),
@@ -1081,10 +1178,15 @@ async function onDevicePriceChange(row: { id: string }, v: number | undefined): 
   await saveAndCompute()
 }
 
-/** 安装单价就地改（用户 ②：以前只能在编辑弹窗改 ✗） */
-async function onInstallPriceChange(row: { id: string }, v: number | undefined): Promise<void> {
-  await quoteApi.updateItem(quoteId.value, row.id, { install_unit_price: v ?? 0 })
-      await reload()
+/** 安装单价就地改（用户 ②：以前只能在编辑弹窗改 ✗）
+ *  定额模式的主行：钱在子目行上 ✓ → 这一格改的是**那条唯一的子目行** ✓
+ *  （主行自己也记一遍 → 安装费翻倍 ✗，见 installDisplay 的说明 ✓）。 */
+async function onInstallPriceChange(row: QuoteItem, v: number | undefined): Promise<void> {
+  if (!canEdit.value) return
+  const kids = installMode.value === 'quota' && !isQuotaChild(row) ? quotaChildren(row) : []
+  const target = kids.length === 1 ? kids[0] : row
+  await quoteApi.updateItem(quoteId.value, target.id, { install_unit_price: v ?? 0 })
+  await reload()
 }
 
 // ==================== 安装单价方式（2026-10-05 用户设计）====================
@@ -1144,6 +1246,74 @@ function isQuotaChild(row: { parent_item_id?: string | null }): boolean {
   return Boolean(row?.parent_item_id)
 }
 
+/** item_id（主行）→ 它下面的定额子目行 ✓ */
+const quotaChildrenMap = computed(() => {
+  const map = new Map<string, QuoteItem[]>()
+  for (const it of items.value) {
+    const pid = it.parent_item_id ? String(it.parent_item_id) : ''
+    if (!pid) continue
+    const arr = map.get(pid) ?? []
+    arr.push(it)
+    map.set(pid, arr)
+  }
+  return map
+})
+
+function quotaChildren(row: { id?: unknown } | null | undefined): QuoteItem[] {
+  return row?.id ? (quotaChildrenMap.value.get(String(row.id)) ?? []) : []
+}
+
+/**
+ * 主设备行的「安装单价 / 安装费 / 小计」展示值（2026-10-08 用户反馈 ✓）。
+ *
+ * 用户原话：「套定额模式，点击 AI 预套定额，然后批量直接确认以后定额价格不会填充到安装单价」
+ * —— 指的是**主设备行这一格** ✓。事实：定额模式下钱落在**定额子目行**上
+ *   （子目行的 install_unit_price = 定额基价 ✓，工程量默认跟随主行 ✓），
+ *   主行自己的 install_unit_price 一直是 0 ✗ → 界面上就是"灰的 0" ✗。
+ *
+ * 为什么不把基价**也写进主行** ✗：安装费 = Σ(数量 × 安装单价) 对**每一行**都算
+ *   （quote_compute.py:292 ✓），主行再记一遍 → **整单安装费翻倍** ✗。
+ * 所以这里只做**展示汇总**（广联达"主子行"的口径 ✓）：主行显示它下面子目行的合计 ✓，
+ *   落库金额一分不动 ✓ → 整单安装费与后端计算始终一致 ✓。
+ */
+function installDisplay(row: QuoteItem): { unit: number; amount: number; kids: number } {
+  const own = { unit: toNum(row.install_unit_price), amount: toNum(row.install_amount), kids: 0 }
+  if (installMode.value !== 'quota') return own
+  const kids = quotaChildren(row)
+  if (!kids.length) return own
+  return {
+    unit: kids.reduce((sum, k) => sum + toNum(k.install_unit_price), 0),
+    amount: kids.reduce((sum, k) => sum + toNum(k.install_amount), 0),
+    kids: kids.length,
+  }
+}
+
+/**
+ * 这一格的安装单价能不能就地改 ✓。
+ *   手动模式 → 跟原来一样，可改（含子目行 ✓）；
+ *   定额模式 → 主行自己没有钱 ✓，改了就**多一笔** ✗ → 只有"恰好一条子目行"时
+ *     才允许改（改的是那条子目行 ✓ 金额口径不变 ✓）；0 条或多条 → 置灰 ✗，
+ *     请走「＋定额」（0 条时建子目 ✓）或直接改子目行 ✓。
+ *   !canEdit（归档/批准/无权限）一律置灰 ✓。
+ */
+function installCellEditable(row: QuoteItem): boolean {
+  if (!canEdit.value) return false
+  if (installMode.value !== 'quota') return true
+  if (isQuotaChild(row)) return true
+  return quotaChildren(row).length === 1
+}
+
+/** 主行的定额编号：自己备注里没有就取子目行 ✓（AI 预套把 quota:xxx 写在子目行上 ✓） */
+function quotaCodeOf(row: { id?: unknown; notes?: string | null }): string {
+  const own = quotaOf(row)
+  if (own) return own
+  for (const k of quotaChildren(row)) {
+    const c = quotaOf(k)
+    if (c) return c
+  }
+  return ''
+}
+
 // ==================== AI 预套定额（2026-10-05 搬到主界面）====================
 //  规则先匹配（产品分类 + 名称）✓ → AI 只在候选里挑 ✓ → **人工确认后**才落库 ✓
 //  约定：定额模式 + 主设备行 → 建定额子目行 ✓；手动模式 → 写备注 quota:编号 ✓
@@ -1157,6 +1327,7 @@ const aiPickedCount = computed(
 )
 
 async function runAiSuggest(): Promise<void> {
+  if (!canEdit.value) return
   aiSuggesting.value = true
   try {
     const { data } = await http.post(`/quotes/${quoteId.value}/quota-suggest`)
@@ -1193,15 +1364,26 @@ async function applySuggestion(itemId: string): Promise<boolean> {
   const cand = ((aiSuggest.value[itemId]?.suggestions ?? []) as Array<Record<string, any>>)
     .find((c) => String(c.code) === code)
   if (installMode.value === 'quota' && !row.parent_item_id) {
-    await quoteApi.addItem(quoteId.value, {
+    // 定额模式 + 主设备行 → 定额子目行 ✓（主行只做**汇总展示** ✓ 见 installDisplay ✓）
+    //  ⚠ 同一条主行再确认一次不许**再加一条**子目行 ✗（安装费会翻倍 ✗）：
+    //     已经有一条 → 改那一条 ✓（幂等 ✓）。
+    const payload = {
       name: cand?.name ? `${code} ${cand.name}` : code,
       unit: String(cand?.unit ?? '项'),
       quantity: Number(row.quantity ?? 1),
-      unit_price: 0,
       install_unit_price: Number(cand?.base_price ?? 0),
       notes: `quota:${code}`,
-      parent_item_id: String(row.id),
-    } as never)
+    }
+    const exist = quotaChildren(row)
+    if (exist.length) {
+      await quoteApi.updateItem(quoteId.value, exist[0].id, payload as never)
+    } else {
+      await quoteApi.addItem(quoteId.value, {
+        ...payload,
+        unit_price: 0,
+        parent_item_id: String(row.id),
+      } as never)
+    }
   } else {
     await quoteApi.updateItem(quoteId.value, row.id, {
       notes: withQuota(row.notes, code),
@@ -1214,6 +1396,7 @@ async function applySuggestion(itemId: string): Promise<boolean> {
 }
 
 async function confirmOne(itemId: string): Promise<void> {
+  if (!canEdit.value) return
   if (await applySuggestion(itemId)) {
     const next = { ...aiSuggest.value }
     delete next[itemId]
@@ -1224,6 +1407,7 @@ async function confirmOne(itemId: string): Promise<void> {
 }
 
 async function confirmBatch(): Promise<void> {
+  if (!canEdit.value) return
   let n = 0
   for (const id of [...aiSelected.value]) {
     if (await applySuggestion(id)) n += 1
@@ -1257,6 +1441,23 @@ const clausesVisible = ref(false)
         <div><span class="k">报价方式</span><span class="v">{{ feeBaseLabel }}</span></div>
         <div><span class="k">计税方式</span><span class="v">{{ rates.tax_rate_pct }}%</span></div>
         <div><span class="k">编制人 / 日期</span><span class="v">{{ auth.displayName }} · {{ quote?.created_at ? dateTime(quote?.created_at).slice(0, 10) : '—' }}</span></div>
+        <!-- 本单有效期（2026-10-08 用户反馈 ✓）：进单后要能一眼看到 ✓，
+             取值链与后端同源（terms_override → valid_days_override → 系统设置 → 30 ✓），
+             悬浮给出算式 ✓，过期/临期用颜色区分 ✓（红 = 已过期 ✓、橙 = ≤7 天 ✓）。 -->
+        <div class="wi-valid">
+          <span class="k">本单有效期</span>
+          <span class="v">
+            <template v-if="validity">
+              <el-tooltip :content="validityTip" placement="bottom">
+                <el-tag size="small" effect="plain" :type="validityTagType(validity.level)">
+                  有效期至 {{ formatLocalDate(validity.validUntil) }}（{{ validity.text }}）
+                </el-tag>
+              </el-tooltip>
+              <span class="text-muted"> 有效天数 {{ validity.days }} 天</span>
+            </template>
+            <span v-else class="text-muted">—</span>
+          </span>
+        </div>
         <div class="wi-no">
           <span class="k">报价单号</span>
           <span class="v mono">{{ quote?.code }}</span>
@@ -1279,7 +1480,7 @@ const clausesVisible = ref(false)
             >
               {{ quoteStatus === 'rejected' ? '重新提交审核' : '提交审核' }}
             </el-button>
-        <el-dropdown v-if="canSubmit || canStartReview || (canApprove && locked)" @command="onStatusCommand">
+        <el-dropdown v-if="canSubmit || canStartReview || (canApprove && quoteStatus === 'approved')" @command="onStatusCommand">
           <el-button size="small" :loading="statusChanging">
             状态操作<el-icon class="el-icon--right"><ArrowDown /></el-icon>
           </el-button>
@@ -1320,6 +1521,17 @@ const clausesVisible = ref(false)
         </el-button>
       </div>
     </div>
+
+    <!-- 归档提示（2026-10-08 用户反馈 ✓）：归档是终态（后端改内容 409 ✓、改状态 422 ✓），
+         界面必须一眼看出"这单不能再改" ✓ —— approved 不走这里 ✗（那是既有审批流程 ✓）。 -->
+    <el-alert
+      v-if="archived"
+      class="mb no-print"
+      type="warning"
+      show-icon
+      :closable="false"
+      title="本单已归档，不可修改；如需增项请新建关联本单的报价单"
+    />
 
     <!-- 停产提醒（保留既有功能；打印不要） -->
     <el-alert
@@ -1363,16 +1575,23 @@ const clausesVisible = ref(false)
       <span class="text-muted toolbar-stat">
         共 {{ stats.subsystems }} 个子系统 · {{ stats.items }} 项设备 · {{ stats.points }} 个点位
       </span>
-          <el-button :loading="accLoading" @click="openAccessoryPicker(true)">
+          <el-button :loading="accLoading" :disabled="!canEdit" @click="openAccessoryPicker(true)">
             <el-icon><Paperclip /></el-icon>&nbsp;配单检查
           </el-button>
           <el-button type="primary" plain @click="clausesVisible = true">
             <el-icon><Document /></el-icon>&nbsp;报价条款
           </el-button>
-          <el-button v-if="installMode === 'quota'" type="primary" :loading="aiSuggesting" @click="runAiSuggest">
+          <!-- 归档/锁定后不能让 AI 预套定额继续改单 ✓（后端本来也会 409 ✓，界面先挡住 ✓） -->
+          <el-button
+            v-if="installMode === 'quota'"
+            type="primary"
+            :loading="aiSuggesting"
+            :disabled="!canEdit"
+            @click="runAiSuggest"
+          >
             <el-icon><MagicStick /></el-icon>&nbsp;AI 预套定额
           </el-button>
-          <el-button v-if="aiPickedCount" @click="confirmBatch">
+          <el-button v-if="aiPickedCount" :disabled="!canEdit" @click="confirmBatch">
             批量直接确认（{{ aiPickedCount }}）
           </el-button>
       <!-- 报价模式：只读彩色标识（2026-10-05 用户要求 ✓）
@@ -1545,18 +1764,21 @@ const clausesVisible = ref(false)
                 :precision="2"
                 :controls="false"
                 size="small"
+                :disabled="!canEdit"
                 style="width: 100%"
                 @change="(v: number | undefined) => onDevicePriceChange(row, v)"
               />
             </template>
           </el-table-column>
           <!-- 安装单价：**就地可编辑**（2026-10-05 用户要求）——
-               以前只有点开编辑弹窗才能改 ✗；设备库也不再维护这个值 ✓ -->
+               以前只有点开编辑弹窗才能改 ✗；设备库也不再维护这个值 ✓
+               2026-10-08 修正 ✓：定额模式下主设备行**直接显示定额基价** ✓
+               （钱落在子目行上 ✓，这里只做汇总展示 ✗ 不重复计费 ✓，见 installDisplay ✓） -->
           <el-table-column label="安装单价" width="128" align="right">
             <template #default="{ row }">
               <el-input-number
-                :model-value="toNum(row.install_unit_price)"
-                :disabled="installMode === 'quota' && !isQuotaChild(row)"
+                :model-value="installDisplay(row).unit"
+                :disabled="!installCellEditable(row)"
                 :min="0"
                 :precision="2"
                 :controls="false"
@@ -1564,6 +1786,9 @@ const clausesVisible = ref(false)
                 style="width: 100%"
                 @change="(v: number | undefined) => onInstallPriceChange(row, v)"
               />
+              <div v-if="installDisplay(row).kids" class="text-muted cell-note">
+                定额子目 {{ installDisplay(row).kids }} 条合计
+              </div>
             </template>
           </el-table-column>
           <!-- 定额：显示本行套的定额编号（备注里的 quota:xxx ✓），点击可换 ✓ -->
@@ -1605,15 +1830,16 @@ const clausesVisible = ref(false)
                 v-if="installMode === 'quota' && !isQuotaChild(row)"
                 link
                 type="primary"
+                :disabled="!canEdit"
                 @click.stop="openQuotaPicker(row)"
               >
                 ＋定额
               </el-button>
-              <el-button link type="primary" @click.stop="openQuotaPicker(row)">
-                <template v-if="quotaOf(row)">
-                  {{ quotaOf(row) }}
-                  <span v-if="quotaInfo[quotaOf(row)]" class="text-muted">
-                    · 基价 {{ quotaInfo[quotaOf(row)].base_price }}
+              <el-button link type="primary" :disabled="!canEdit" @click.stop="openQuotaPicker(row)">
+                <template v-if="quotaCodeOf(row)">
+                  {{ quotaCodeOf(row) }}
+                  <span v-if="quotaInfo[quotaCodeOf(row)]" class="text-muted">
+                    · 基价 {{ quotaInfo[quotaCodeOf(row)].base_price }}
                   </span>
                 </template>
                 <template v-else>未套定额</template>
@@ -1642,11 +1868,13 @@ const clausesVisible = ref(false)
             </template>
           </el-table-column>
           <el-table-column label="安装费" width="106" align="right">
-            <template #default="{ row }"><span class="num">{{ money(row.install_amount) }}</span></template>
+            <template #default="{ row }">
+              <span class="num">{{ money(installDisplay(row).amount) }}</span>
+            </template>
           </el-table-column>
           <el-table-column label="小计" width="118" align="right">
             <template #default="{ row }">
-              <span class="num strong">{{ money(toNum(row.equipment_amount) + toNum(row.install_amount)) }}</span>
+              <span class="num strong">{{ money(toNum(row.equipment_amount) + installDisplay(row).amount) }}</span>
             </template>
           </el-table-column>
           <el-table-column label="操作" width="104" fixed="right" class-name="col-no-print" label-class-name="col-no-print">
@@ -1836,7 +2064,7 @@ const clausesVisible = ref(false)
           </div>
           <template #footer>
             <el-button @click="accPickVisible = false">稍后再说</el-button>
-            <el-button type="primary" :loading="accLoading" @click="confirmAccessories">
+            <el-button type="primary" :loading="accLoading" :disabled="!canEdit" @click="confirmAccessories">
               确认加入附件
             </el-button>
           </template>
@@ -1973,8 +2201,8 @@ const clausesVisible = ref(false)
                 </div>
               </div>
             </div>
-        <el-button type="primary" :loading="clausesSaving" @click="saveClauses">保存条款设置</el-button>
-        <el-button @click="useOwnClauses = false; saveClauses()">恢复用系统设置</el-button>
+        <el-button type="primary" :loading="clausesSaving" :disabled="!canEdit" @click="saveClauses">保存条款设置</el-button>
+        <el-button :disabled="!canEdit" @click="useOwnClauses = false; saveClauses()">恢复用系统设置</el-button>
         <div v-if="clausesData?.clauses_overridden || clausesData?.valid_days_overridden"
           class="text-muted" style="margin-top: 6px">
           本单已自定义（不影响其它报价单）
@@ -1995,7 +2223,7 @@ const clausesVisible = ref(false)
         </div>
         <template #footer>
           <el-button @click="clausesVisible = false">取消</el-button>
-          <el-button type="primary" :loading="clausesSaving" @click="saveClauses">
+          <el-button type="primary" :loading="clausesSaving" :disabled="!canEdit" @click="saveClauses">
             保存（落到打印 / 预览 ✓）
           </el-button>
         </template>
@@ -2549,6 +2777,13 @@ const clausesVisible = ref(false)
   font-size: 11.5px;
   line-height: 1.7;
   padding: 0 2px 6px;
+}
+
+/* 主行安装单价格子下面那行小字（定额子目 N 条合计 ✓）—— 说明这个数的出处 ✓ */
+.cell-note {
+  font-size: 10.5px;
+  line-height: 1.4;
+  text-align: right;
 }
 
 .clause-preview {

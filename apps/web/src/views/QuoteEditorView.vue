@@ -10,7 +10,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
-import { deviceApi, projectApi, quoteApi } from '@/api'
+import { deviceApi, projectApi, quoteApi, settingApi } from '@/api'
 import { extractErrorMessage } from '@/api/client'
 import type {
   AccessoryCheck,
@@ -39,6 +39,13 @@ import {
   toNum,
 } from '@/utils/format'
 import { downloadBlob } from '@/utils/download'
+import {
+  effectiveValidDays,
+  formatLocalDate,
+  validityHint,
+  validityInfo,
+  validityTagType,
+} from '@/utils/quoteValidity'
 
 /** 替代型号推荐行的形状（来自 /devices/{id}/replacements 的候选）。 */
 type SuggestRow = {
@@ -301,7 +308,62 @@ async function reload(): Promise<void> {
 }
 
 onMounted(async () => {
-  await Promise.all([meta.load(), reload()])
+  await Promise.all([meta.load(), reload(), loadValidDays(), loadSettingsValidDays()])
+})
+
+// ----- 本单有效期（2026-10-08 用户反馈：进单后看不到「本单有效期」✗）-----
+//  天数来源（按优先级 ✓）：
+//    ① 后端 `GET /quotes/{id}/export-clauses` 的 valid_days ✓ —— 与客户版预览/PDF 同源 ✓，
+//       不依赖 `setting:read` 权限 ✓；
+//    ② 拿不到退回前端取值链 ✓（复用 utils/quoteValidity 的纯函数 ✗ 不另写一套 ✓）：
+//         terms_override.valid_days → valid_days_override → 系统设置 quote.valid_days → 30
+//  ⚠ 系统设置要 `setting:read` 权限：先判权限再发请求 ✓，拿不到就降级 ✓（不弹 403 警告 ✗）。
+const validDaysFromApi = ref<number | null>(null)
+const settingsValidDays = ref<number | null>(null)
+
+async function loadValidDays(): Promise<void> {
+  try {
+    const d = await quoteApi.exportClauses(quoteId.value)
+    validDaysFromApi.value = d.valid_days ?? null
+  } catch {
+    validDaysFromApi.value = null
+  }
+}
+
+async function loadSettingsValidDays(): Promise<void> {
+  if (!auth.can('setting', 'read')) return
+  try {
+    const s = await settingApi.get()
+    settingsValidDays.value = s.quote?.valid_days ?? null
+  } catch {
+    settingsValidDays.value = null
+  }
+}
+
+/**
+ * 报价日期（有效期起点）→ 交给纯函数时用的**本地** ISO 串。
+ * `created_at` 带 Z（UTC）✓，而后端 export_data._quote_date 用的是**服务器本地**日期 ✓
+ * （本部署服务器 TZ = UTC ✓，浏览器 +08:00 ✗）→ 直接取浏览器本地日期会比导出件差一天 ✗。
+ * 所以先取 UTC 日历那一天 ✓（与后端一致 ✓），再当成本地 00:00 ✓；只转这一次 ✗ 不双重换算 ✗。
+ */
+function quoteStartIso(createdAt: string | null | undefined): string | null {
+  if (!createdAt) return null
+  const d = new Date(createdAt)
+  if (Number.isNaN(d.getTime())) return null
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}T00:00:00`
+}
+
+const validity = computed(() => {
+  const q = quote.value
+  if (!q) return null
+  const days = validDaysFromApi.value ?? effectiveValidDays(q, settingsValidDays.value)
+  return validityInfo(quoteStartIso(q.created_at), days)
+})
+
+const validityTip = computed(() => {
+  const q = quote.value
+  return validity.value && q ? validityHint(quoteStartIso(q.created_at), validity.value) : ''
 })
 
 /** 有效费率载荷：后端会校验，前端先做一次非负检查，避免把负数写进库。 */
@@ -329,6 +391,12 @@ function validateRates(): boolean {
 
 /** 保存费率并重算。 */
 async function saveAndCompute(): Promise<void> {
+  // 归档 = 定稿 ✓：`POST /compute` 后端**没有** _assert_editable 兜底 ✗（它能写费率 ✗），
+  // 所以这里自己挡住 ✓。approved 保持现状 ✓（有权限的审批人仍可重算对齐 ✓）。
+  if (archived.value) {
+    ElMessage.warning('本单已归档，不可修改；如需增项请新建关联本单的报价单')
+    return
+  }
   if (!validateRates()) return
   computing.value = true
   try {
@@ -590,6 +658,13 @@ const quoteStatus = computed(() => String(quote.value?.status ?? 'draft'))
 const locked = computed(() => ['approved', 'archived'].includes(quoteStatus.value))
 
 /**
+ * 已归档（2026-10-08 用户反馈 ✓）：归档是**终态** —— 后端改内容 409 ✓、改状态 422 ✓
+ * （不能再"退回草稿"✗）。界面要整单只读 ✓，并明确告诉用户下一步该做什么 ✓。
+ * approved 不走这一支 ✗（批准单允许有权限的人退回草稿，那是既有审批流程 ✓）。
+ */
+const archived = computed(() => quoteStatus.value === 'archived')
+
+/**
  * 能否编辑报价内容 = 有编制权限 且 单据未锁定。
  * 锁定时把入口禁用（而不是让用户点完再吃一个 409）：后端会返回
  * 「已批准不允许直接修改，请先退回草稿」，但让人先看到禁用状态更省事。
@@ -824,8 +899,14 @@ function openInquiryImport(): void {
             · <el-tag size="small" :type="locked ? 'success' : 'info'" effect="plain">
               {{ meta.label('quote_status', quote.status) }}
             </el-tag>
+            <!-- 本单有效期（2026-10-08 用户反馈：进单后看不到 ✗）✓ -->
+            <el-tooltip v-if="validity" :content="validityTip" placement="bottom">
+              <el-tag size="small" effect="plain" :type="validityTagType(validity.level)" class="ml">
+                有效期至 {{ formatLocalDate(validity.validUntil) }}（{{ validity.text }}）
+              </el-tag>
+            </el-tooltip>
             <el-tag v-if="locked" size="small" type="warning" effect="plain" class="ml">
-              已锁定：改内容需先退回草稿
+              {{ archived ? '已归档：本单不可修改' : '已锁定：改内容需先退回草稿' }}
             </el-tag>
             <!-- 审批人看到草稿/驳回单：不是没按钮，是"还不能批" -->
             <el-tag v-if="needsSubmitFirst" size="small" type="info" effect="plain" class="ml">
@@ -871,7 +952,13 @@ function openInquiryImport(): void {
             驳回
           </el-button>
         </template>
-        <el-dropdown v-if="canApprove && locked" trigger="click" @command="onMoreCommand">
+        <!-- 归档是终态（后端改状态 422 ✗）：不再给「退回草稿」入口 ✗，只留只读查看 ✓。
+             approved 仍保留退回草稿 ✓（既有审批流程 ✓）。 -->
+        <el-dropdown
+          v-if="canApprove && quoteStatus === 'approved'"
+          trigger="click"
+          @command="onMoreCommand"
+        >
           <el-button :loading="statusChanging">
             更多<el-icon class="el-icon--right"><ArrowDown /></el-icon>
           </el-button>
@@ -921,17 +1008,29 @@ function openInquiryImport(): void {
           <el-icon><SetUp /></el-icon>&nbsp;费率与人工浮动{{ ratesDirty ? ' *' : '' }}
         </el-button>
         <!-- 重算与"改费率"分开判权：审批人（manager）只读不能改费率，
-             但必须能重算对齐数字，否则只能退回让别人算。 -->
+             但必须能重算对齐数字，否则只能退回让别人算。
+             2026-10-08：归档单连重算入口也置灰 ✓（归档即定稿 ✓；compute 口子能写费率 ✗，
+             界面先挡住 ✓）—— approved 不置灰 ✗（既有流程允许审批人重算对齐 ✓）。 -->
         <el-button
           type="primary"
           :loading="computing"
-          :disabled="!auth.canWrite && !auth.can('quote', 'compute')"
+          :disabled="archived || (!auth.canWrite && !auth.can('quote', 'compute'))"
           @click="saveAndCompute"
         >
           <el-icon><Refresh /></el-icon>&nbsp;重算
         </el-button>
       </div>
     </div>
+
+    <!-- 归档提示（2026-10-08 用户反馈 ✓）：归档是终态，界面必须整单只读 ✓ -->
+    <el-alert
+      v-if="archived"
+      type="warning"
+      show-icon
+      :closable="false"
+      class="mb no-print"
+      title="本单已归档，不可修改；如需增项请新建关联本单的报价单"
+    />
 
     <!-- 停产 / 待询价 提醒条：屏幕上的提醒，打印不要。 -->
     <el-alert
@@ -1115,10 +1214,10 @@ function openInquiryImport(): void {
               </div>
 
               <el-form-item>
-                <el-button type="primary" :loading="savingRates" @click="saveRatesOnly">
+                <el-button type="primary" :loading="savingRates" :disabled="archived" @click="saveRatesOnly">
                   保存费率
                 </el-button>
-                <el-button :loading="computing" @click="saveAndCompute">保存并重算</el-button>
+                <el-button :loading="computing" :disabled="archived" @click="saveAndCompute">保存并重算</el-button>
                 <span class="text-muted" style="margin-left: 8px">
                   费率修改需报价编制权限；审批人可用「重算」对齐最新数字
                 </span>
