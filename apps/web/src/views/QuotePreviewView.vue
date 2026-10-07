@@ -192,7 +192,23 @@ watch(paper, () => nextTick(measurePagination))
 let _ro: ResizeObserver | null = null
 onMounted(() => {
   nextTick(measurePagination)
-  setTimeout(measurePagination, 600)      // 字体/图片稳定后再量一次 ✓
+  // 字体就绪后再量 ✓（2026-10-05 实测：折行规则一改，行高就变 ✓，
+  //   量早了算出来的"剩余半页"是错的 ✗ → 该换页的没换 ✓）
+  void document.fonts.ready.then(() => measurePagination())
+  setTimeout(measurePagination, 600)
+  setTimeout(measurePagination, 1500)
+  setTimeout(() => {
+    measurePagination()
+    // 把量到的关键数字挂到 window 上 ✓：便于"预览自检"脚本把真实几何打出来 ✓
+    ;(window as unknown as Record<string, unknown>).__qpDebug = {
+      pageH: pageContentHeight(),
+      sheetH: sheetRef.value?.scrollHeight ?? 0,
+      bottomTop: bottomRef.value ? bottomRef.value.offsetTop - (sheetRef.value?.offsetTop ?? 0) : -1,
+      blockH: bottomRef.value?.offsetHeight ?? 0,
+      breakGap: breakGap.value,
+      pageCount: pageCount.value,
+    }
+  }, 2000)
   const el = sheetRef.value
   if (el && typeof ResizeObserver !== 'undefined') {
     _ro = new ResizeObserver(() => {
@@ -273,7 +289,8 @@ const groups = computed<Group[]>(() => {
     const items = buckets.get(key)!
     return {
       key,
-      title: key === '__none__' ? '未归子系统' : (subsystemNames.value.get(key) ?? '（未命名子系统）'),
+      // 2026-10-05 ✓：「未归子系统」是内部叫法 ✗，不该印在客户版上 ✓ → 改中性称呼 ✓
+              title: key === '__none__' ? '其他设备' : (subsystemNames.value.get(key) ?? '其他设备'),
       items,
       subtotal: items.reduce((s, it) => s + rowAmount(it), 0),
     }
@@ -509,11 +526,20 @@ function back(): void {
         </table>
 
         <!-- 报价说明 + 合计 -->
+        <!-- 分页标（2026-10-05 ✓）：屏幕上这段空白是为对齐打印分页留的 ✓，
+             以前毫无说明 ✗ 看着像布局坏了 ✓ → 现在画一条虚线并标注 ✓；打印时隐藏 ✓。 -->
+        <div
+          v-if="breakGap"
+          class="qp-break-spacer"
+          :style="{ height: breakGap + 'px' }"
+        >
+          <span>—— 分页 ——</span>
+        </div>
+
         <div
           ref="bottomRef"
           class="doc-bottom"
           :class="{ 'qp-break-before': breakBeforeFees }"
-          :style="breakGap ? { marginTop: breakGap + 'px' } : undefined"
         >
           <div class="doc-clauses">
             <div class="doc-section-title">报价说明</div>
@@ -551,6 +577,29 @@ function back(): void {
 </template>
 
 <style scoped>
+/* 分页标（2026-10-05 ✓）：虚线 + 居中文字，说明"此处换页" ✓ */
+.qp-break-spacer {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.qp-break-spacer::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  border-top: 1px dashed #c0c4cc;
+}
+.qp-break-spacer span {
+  position: relative;
+  padding: 0 10px;
+  background: #fff;
+  color: #909399;
+  font-size: 12px;
+  letter-spacing: 1px;
+}
+
 .qp {
   display: flex;
   flex-direction: column;
@@ -690,7 +739,10 @@ function back(): void {
   border: 1px solid #d1d5db;
   padding: 3px 5px;
   font-size: 11.5px;
-  word-break: break-all;
+  /* 2026-10-05 ✓：break-all 会在单词中间断开 ✗（出现 "…7.58Tb / ps" ✓）；
+     normal 让拉丁词优先在空格/标点处折 ✓，实在放不下才断词 ✓。 */
+  word-break: normal;
+  overflow-wrap: break-word;
 }
 
 .doc-table th {

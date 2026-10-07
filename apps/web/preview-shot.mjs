@@ -17,7 +17,7 @@ const browser = await puppeteer.launch({
 })
 try {
   const page = await browser.newPage()
-  await page.setViewport({ width: 1680, height: 1000, deviceScaleFactor: 1 })
+  await page.setViewport({ width: 1680, height: 2400, deviceScaleFactor: 1 })
   // 先把登录令牌塞进 localStorage ✓（键名来自 apps/web/src/api/client.ts：quote.token ✓）
   await page.evaluateOnNewDocument((t) => {
     try {
@@ -50,6 +50,9 @@ try {
   })
   console.log('SCREEN ' + JSON.stringify(info))
 
+  // 把页面自检的数字也读出来 ✓（我加的 __qpDebug ✓）
+  const dbg = await page.evaluate(() => (window).__qpDebug ?? null)
+  console.log('DEBUG ' + JSON.stringify(dbg))
   await page.screenshot({ path: outPng, fullPage: true })
   // ★ 这一句就是"打印" ✓：Chrome 的打印分页引擎，与 Ctrl+P 完全同源 ✓
   await page.pdf({

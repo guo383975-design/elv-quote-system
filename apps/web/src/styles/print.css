@@ -236,3 +236,10 @@
     margin-top: 0 !important;      /* 屏幕上的留白只为对齐预览 ✓，打印时由分页完成 ✓ */
   }
 }
+
+/* 分页标只在屏幕上显示 ✓（打印由真正的分页完成 ✓，2026-10-05） */
+@media print {
+  .qp-break-spacer {
+    display: none !important;
+  }
+}
