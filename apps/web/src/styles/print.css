@@ -19,7 +19,7 @@
 @media print {
   /* ---------- 页面规格：A4 竖向，12mm 边距 ---------- */
   @page {
-    size: A4 portrait;
+    size: A4 landscape;
     margin: 12mm;
   }
 
@@ -220,5 +220,19 @@
 @media screen {
   .print-only {
     display: none !important;
+  }
+}
+
+/* 报价说明 + 费用合计：整块不拆 + 剩余不足半页时另起一页
+   （2026-10-05 用户要求 ✓：这两个块被截断最难读 ✓）。 */
+@media print {
+  .doc-bottom {
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+  }
+  .qp-break-before {
+    break-before: page !important;
+    page-break-before: always !important;
+    margin-top: 0 !important;      /* 屏幕上的留白只为对齐预览 ✓，打印时由分页完成 ✓ */
   }
 }

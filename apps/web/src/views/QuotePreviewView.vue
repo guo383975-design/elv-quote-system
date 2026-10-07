@@ -21,7 +21,7 @@
  *      系统里没有"公司信息配置"，所以还不支持改抬头。
  */
 import { ElMessage } from 'element-plus'
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { projectApi, quoteApi } from '@/api'
@@ -46,6 +46,68 @@ const quote = ref<QuoteDetail | null>(null)
 
 // ----- 工具条开关 -----
 const paper = ref<'A4-landscape' | 'A4-portrait'>('A4-landscape')
+
+// ==================== 屏幕分页 = 打印分页（2026-10-05 用户反馈 ✓）====================
+// 用户看到的问题 ✓：屏幕页脚写死「第 1 页 / 共 1 页」✗，而实际打印已经用到第 2 页 ✓。
+// 根因 ✓：屏幕上是一整张**长条**纸 ✗（没有分页）✓ → 只能自己按真实 A4 算分页 ✓。
+//
+// 一页内容高怎么算 ✓（用真实纸张几何，不用纸的宽高比 ✗）：
+//   · 打印边距 12mm ✓ → 可打印区 273 × 186 mm（A4 横向 297×210 ✓）
+//   · 屏幕纸内容宽 1068px（1120 − 左右 padding 26×2 ✓）↔ 273mm
+//   · 所以 1mm ≈ 1068/273 px ✓，一页高 = 186 × 1068/273 ≈ 728px ✓
+const sheetRef = ref<HTMLElement | null>(null)
+const bottomRef = ref<HTMLElement | null>(null)
+const pageCount = ref(1)
+/** 报价说明+费用合计这一块要不要另起一页 ✓（剩余不足半页时 ✓） */
+const breakBeforeFees = ref(false)
+/** 另起一页时，屏幕上留出的空白高度 ✓（与打印的空白对应 ✓） */
+const breakGap = ref(0)
+
+const PAGE_MARGIN_MM = 12
+
+function pageContentHeight(): number {
+  const el = sheetRef.value
+  if (!el) return 728
+  const style = window.getComputedStyle(el)
+  const padX = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight)
+  const contentW = el.clientWidth - padX || el.clientWidth
+  const landscape = paper.value === 'A4-landscape'
+  const paperW = landscape ? 297 : 210
+  const paperH = landscape ? 210 : 297
+  const printableW = paperW - 2 * PAGE_MARGIN_MM
+  const printableH = paperH - 2 * PAGE_MARGIN_MM
+  return (contentW / printableW) * printableH      // 单位：px ✓
+}
+
+/** 量一次：页数 + 报价说明那块要不要另起一页 ✓ */
+function measurePagination(): void {
+  const sheet = sheetRef.value
+  if (!sheet) return
+  const pageH = pageContentHeight()
+  const total = sheet.scrollHeight
+  pageCount.value = Math.max(1, Math.ceil((total - 2) / pageH))
+
+  // 50% 规则 ✓：这块在它所在页的剩余空间不足半页 → 整块下移到下一页 ✓
+  const bottom = bottomRef.value
+  if (!bottom) {
+    breakBeforeFees.value = false
+    return
+  }
+  const topInSheet = bottom.offsetTop - sheet.offsetTop - parseFloat(
+    window.getComputedStyle(sheet).paddingTop,
+  )
+  const usedOnPage = topInSheet % pageH
+  const remain = pageH - usedOnPage
+  const need = bottom.offsetHeight
+  const shouldBreak = remain < pageH / 2 && need <= pageH
+  breakBeforeFees.value = shouldBreak
+  // 屏幕上留出与打印一致的空白 ✓ —— 让"屏幕看到的"与"打印出来的"分页相同 ✓
+  breakGap.value = shouldBreak ? remain : 0
+  // 分页变化会改变总高 → 页数要重算 ✓
+  nextTick(() => {
+    pageCount.value = Math.max(1, Math.ceil((sheet.scrollHeight - 2) / pageH))
+  })
+}
 const showBrandModel = ref(true)
 const splitInstall = ref(false)
 
@@ -114,6 +176,9 @@ function applyPaper(): void {
 }
 
 watch(paper, applyPaper)
+// 纸张/内容一变就重量分页 ✓（2026-10-05 ✓）
+watch(paper, () => nextTick(measurePagination))
+onMounted(() => nextTick(measurePagination))
 onUnmounted(() => {
   pageStyleEl?.remove()
   pageStyleEl = null
@@ -317,7 +382,11 @@ function back(): void {
 
     <!-- ③ 文档（打印时只留这一块） -->
     <div class="qp-sheet-wrap">
-      <div class="qp-sheet" :class="paper === 'A4-portrait' ? 'portrait' : 'landscape'">
+      <div
+        ref="sheetRef"
+        class="qp-sheet"
+        :class="paper === 'A4-portrait' ? 'portrait' : 'landscape'"
+      >
         <!-- 抬头 -->
         <div class="doc-head">
           <div class="doc-company">
@@ -410,7 +479,12 @@ function back(): void {
         </table>
 
         <!-- 报价说明 + 合计 -->
-        <div class="doc-bottom">
+        <div
+          ref="bottomRef"
+          class="doc-bottom"
+          :class="{ 'qp-break-before': breakBeforeFees }"
+          :style="breakGap ? { marginTop: breakGap + 'px' } : undefined"
+        >
           <div class="doc-clauses">
             <div class="doc-section-title">报价说明</div>
             <ol>
@@ -439,7 +513,7 @@ function back(): void {
         </div>
 
         <div class="doc-foot">
-          第 1 页 / 共 1 页
+          第 1 页 / 共 {{ pageCount }} 页
         </div>
       </div>
     </div>
