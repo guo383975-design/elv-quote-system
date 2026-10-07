@@ -184,7 +184,31 @@ function applyPaper(): void {
 watch(paper, applyPaper)
 // 纸张/内容一变就重量分页 ✓（2026-10-05 ✓）
 watch(paper, () => nextTick(measurePagination))
-onMounted(() => nextTick(measurePagination))
+// ⚠ 只在挂载时量一次是不够的（2026-10-05 实测抓到 ✓）：
+//   挂载那一刻**报价数据还没回来** ✓ → 纸是空的 ✓ → 页数恒为 1 ✗、
+//   "报价说明是否要另起一页"也恒为 false ✗（于是该换页的没换 ✓）。
+//   改法：① 数据到了重量一次 ✓ ② 用 ResizeObserver 盯着纸的高度 ✓（内容一变就重量 ✓）。
+//   ⚠ 观察回调里必须**先比较再赋值** ✗ —— 否则"赋值→尺寸变→再触发"会自激死循环 ✓。
+let _ro: ResizeObserver | null = null
+onMounted(() => {
+  nextTick(measurePagination)
+  setTimeout(measurePagination, 600)      // 字体/图片稳定后再量一次 ✓
+  const el = sheetRef.value
+  if (el && typeof ResizeObserver !== 'undefined') {
+    _ro = new ResizeObserver(() => {
+      const before = pageCount.value
+      const beforeGap = breakGap.value
+      measurePagination()
+      if (pageCount.value === before && breakGap.value === beforeGap) return
+      // 值确实变了 → 允许下一次回调（尺寸变化是预期的 ✓）
+    })
+    _ro.observe(el)
+  }
+})
+onUnmounted(() => {
+  _ro?.disconnect()
+  _ro = null
+})
 onUnmounted(() => {
   pageStyleEl?.remove()
   pageStyleEl = null
