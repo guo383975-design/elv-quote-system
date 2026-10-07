@@ -139,7 +139,10 @@ async def test_spec_column_only_when_present(
 
     # 客户版（include_cost=False）**永远不输出参数列** ——
     # 2026-10-05 用户要求 C ✓：横向 14 列已很紧 ✓，参数列会把名称/品牌/型号/价格挤成竖排 ✗。
-    customer_with_spec = ExportContext(meta=meta, items=[
+    # 客户版 PDF：由后端传 show_spec_column=False ✓（2026-10-05 ✓）
+    from dataclasses import replace as _replace
+
+    customer_with_spec = ExportContext(meta=_replace(meta, show_spec_column=False), items=[
         ExportItemRow(seq=1, subsystem="", name="设备", brand="", model="M",
                       spec_text="吞吐 10Gbps", unit="台", quantity="1",
                       unit_price="1", amount="1", source_label="", note=""),
@@ -149,9 +152,8 @@ async def test_spec_column_only_when_present(
     )
 
     # 参数列只在**内部版**（含成本）里、且确实填了参数时才出现 ✓
-    from dataclasses import replace
-
-    withspec = ExportContext(meta=replace(meta, include_cost=True), items=[
+    withspec = ExportContext(
+        meta=_replace(meta, include_cost=True, show_spec_column=True), items=[
         ExportItemRow(seq=1, subsystem="", name="设备", brand="", model="M",
                       spec_text="吞吐 10Gbps", unit="台", quantity="1",
                       unit_price="1", amount="1", source_label="", note=""),

@@ -73,6 +73,10 @@ class ExportMeta:
     tax_rate_pct: str          # 已乘 100 并带 % 号，如 "9%"
     generated_at: str          # 本地时间，如 "2026-09-29 07:00"
     include_cost: bool
+    # 是否输出「设备参数」列（2026-10-05 ✓）：
+    #   客户版 PDF 不出 ✓（用户要求 C：横向列太挤 ✓，参数会把价格挤成竖排 ✓）；
+    #   Excel 与内部版保持原样 ✓。默认 True = 老调用点行为不变 ✓。
+    show_spec_column: bool = True
     # 利润是**独立一档**权限（2026-10-05 审计发现：只给成本却带出了毛利）。
     # None = 跟随 include_cost（老调用点行为不变）。
     include_profit: bool | None = None
@@ -153,12 +157,12 @@ class ExportContext:
     def show_spec(self) -> bool:
         """是否输出「设备参数」列。
 
-        **客户版一律不输出**（2026-10-05 用户要求 C ✓）：
+        **客户版 PDF 不输出**（2026-10-05 用户要求 C ✓）：
           A4 横向 14 列本就很紧 ✓，参数列一长就把「设备名称/品牌/型号/价格」
           挤成竖排 ✓（实测：30% 上限允许它独吞 79mm ✗）→ 客户看着难受 ✓。
           参数只在**内部版**（含成本的版本）保留 ✓ —— 那是给自己看的 ✓。
         """
-        if not self.include_cost:
+        if not getattr(self.meta, "show_spec_column", True):
             return False
         return any((row.spec_text or "").strip() for row in self.items)
 
@@ -502,6 +506,8 @@ def build_context(
     # 利润是**独立一档**权限（2026-10-05）：不给就剥掉毛利行。
     # None = 跟随 include_cost（老调用点行为不变）。
     include_profit: bool | None = None,
+    # 客户版 PDF 传 False ✓（Excel 不传 → 保持原样 ✓）
+    show_spec_column: bool = True,
     generated_at: datetime | None = None,
     settings: dict | None = None,
 ) -> ExportContext:
@@ -539,6 +545,7 @@ def build_context(
         tax_rate_pct=rate_pct_text(getattr(quote, "tax_rate", None)),
         generated_at=now.strftime("%Y-%m-%d %H:%M"),
         include_cost=include_cost,
+        show_spec_column=show_spec_column,
         include_profit=include_profit,
         notes=_s(getattr(quote, "notes", "")),
         quote_date=(_quote_date(quote) or "—"),
