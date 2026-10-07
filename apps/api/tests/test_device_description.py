@@ -141,7 +141,6 @@ async def test_spec_column_only_when_present(
     # 2026-10-05 用户要求 C ✓：横向 14 列已很紧 ✓，参数列会把名称/品牌/型号/价格挤成竖排 ✗。
     # 客户版 PDF：由后端传 show_spec_column=False ✓（2026-10-05 ✓）
     from dataclasses import replace as _replace
-
     customer_with_spec = ExportContext(meta=_replace(meta, show_spec_column=False), items=[
         ExportItemRow(seq=1, subsystem="", name="设备", brand="", model="M",
                       spec_text="吞吐 10Gbps", unit="台", quantity="1",
