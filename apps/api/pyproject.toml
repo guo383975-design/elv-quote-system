@@ -1,7 +1,7 @@
 [project]
 name = "quote-api"
 # 版本号要跟 apps/api/app/__init__.py 的 __version__、apps/web/package.json 一起改
-version = "0.1.4"
+version = "0.1.5"
 description = "智能化弱电报价系统 API"
 authors = [{ name = "XX科技有限公司" }]
 requires-python = ">=3.11"
