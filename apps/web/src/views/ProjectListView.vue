@@ -3,9 +3,15 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, onActivated, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 
-import { projectApi, quoteApi , customerApi } from '@/api'
+import { projectApi, quoteApi, settingApi, customerApi } from '@/api'
 import type { AuditLogEntry, Project, Quote , Customer } from '@/api/types'
 import { dateOnly, dateTime, money, percentInputToRatio, ratioToPercentInput, toNum } from '@/utils/format'
+import {
+  effectiveValidDays,
+  validityHint,
+  validityInfo,
+  validityTagType,
+} from '@/utils/quoteValidity'
 import { useAuthStore } from '@/stores/auth'
 import { useMetaStore } from '@/stores/meta'
 
@@ -61,6 +67,93 @@ const expandedIds = ref<string[]>([])
 const quotesByProject = reactive<Record<string, Quote[]>>({})
 const quotesLoading = reactive<Record<string, boolean>>({})
 const quoteBusy = ref<string | null>(null)
+
+// ----- 报价有效期倒计时（2026-10-07 用户要求）-----
+// 取值链在 `utils/quoteValidity.ts` 里（与后端一致）：
+//   条款覆盖 terms_override.valid_days → 旧字段 valid_days_override
+//   → 系统设置 quote.valid_days → 兜底 30 天。
+// 系统设置只有 `setting:read` 权限才拿得到（403 会被吞掉）：拿不到就回落兜底值，
+// 不因为"设置读不到"就让整个项目列表报错。
+const settingsValidDays = ref<number | null>(null)
+
+async function loadSettingsValidDays(): Promise<void> {
+  // `GET /settings` 要 `setting:read`（只有 admin / manager / estimator 有），
+  // 而 axios 拦截器对 403 会**全局弹一条警告** —— 销售/采购/财务点开项目列表
+  // 就会平白看到"权限不足" ✗。所以先按权限判断，没权限就别发这个请求。
+  if (!auth.can('setting', 'read')) return
+  try {
+    const s = await settingApi.get()
+    settingsValidDays.value = s.quote?.valid_days ?? null
+  } catch {
+    settingsValidDays.value = null
+  }
+}
+
+/** 有效期单元格：文本 + 配色 + 悬浮算式（报价日期算不出来时 ok=false）。 */
+function validityCell(q: Quote): {
+  ok: boolean
+  text: string
+  tip: string
+  tagType: 'info' | 'warning' | 'danger'
+} {
+  const info = validityInfo(q.created_at, effectiveValidDays(q, settingsValidDays.value))
+  if (!info) {
+    return { ok: false, text: '—', tip: '报价日期缺失，无法计算有效期', tagType: 'info' }
+  }
+  return {
+    ok: true,
+    text: info.text,
+    tip: validityHint(q.created_at, info),
+    tagType: validityTagType(info.level),
+  }
+}
+
+/** 「增项自 <原单号>」的原单号：原单可能不在本页已加载的列表里 → 返回空串。 */
+function originCode(q: Quote): string {
+  if (!q.based_on_quote_id) return ''
+  for (const list of Object.values(quotesByProject)) {
+    const hit = list.find((x) => x.id === q.based_on_quote_id)
+    if (hit) return hit.code
+  }
+  return ''
+}
+
+/** 增项来源标签：查不到原单号就只显示「增项单」（不能编一个不存在的单号）。 */
+function addonSourceLabel(q: Quote): string {
+  const code = originCode(q)
+  return code ? `增项自 ${code}` : '增项单'
+}
+
+const addonBusy = ref<string | null>(null)
+
+/**
+ * 新增项报价单（2026-10-07 用户要求）。
+ *
+ * 带上 `based_on_quote_id` 建单后，后端会**自动复制**原单的费率/条款快照
+ * （含 install_mode）与全部明细（含父子关系），所以这里不要自己抄明细。
+ * 归档单也能用 —— 归档后原单不可改，增项是唯一出口 ✓。
+ */
+async function createAddonQuote(row: Project, q: Quote): Promise<void> {
+  if (addonBusy.value) return
+  addonBusy.value = q.id
+  try {
+    const created = await quoteApi.create({
+      project_id: row.id,
+      title: `${q.code} 增项`,
+      based_on_quote_id: q.id,
+    })
+    ElMessage.success(`已按 ${q.code} 生成增项单 ${created.code}`)
+    await router.push({
+      name: 'quote-workbench',
+      params: { projectId: row.id, quoteId: created.id },
+    })
+  } catch (e) {
+    const msg = (e as { message?: string }).message
+    ElMessage.error(msg || '新增项报价单失败')
+  } finally {
+    addonBusy.value = null
+  }
+}
 
 async function loadQuotes(projectId: string): Promise<void> {
   quotesLoading[projectId] = true
@@ -297,6 +390,8 @@ function resetAndLoad(): void {
 onMounted(() => {
   void loadStatusOptions()
   void load()
+  // 有效天数的兜底值来自「系统设置」，只拉一次；失败就当没有（回落 30 天）。
+  void loadSettingsValidDays()
 })
 
 /**
@@ -531,7 +626,20 @@ async function openSubsystems(row: Project): Promise<void> {
                 size="small"
                 border
               >
-                <el-table-column prop="code" label="报价单号" width="180" />
+                <el-table-column prop="code" label="报价单号" width="200">
+                  <template #default="{ row: q }">
+                    <div>{{ q.code }}</div>
+                    <!-- 增项来源（2026-10-07）：based_on_quote_id 非空就是增项单 ✓ -->
+                    <el-tag
+                      v-if="q.based_on_quote_id"
+                      size="small"
+                      type="warning"
+                      effect="plain"
+                    >
+                      {{ addonSourceLabel(q) }}
+                    </el-tag>
+                  </template>
+                </el-table-column>
                 <el-table-column label="版本" width="70">
                   <template #default="{ row: q }">v{{ q.version }}</template>
                 </el-table-column>
@@ -546,6 +654,18 @@ async function openSubsystems(row: Project): Promise<void> {
                     </el-tag>
                   </template>
                 </el-table-column>
+                <!-- 有效期倒计时（2026-10-07 用户要求）：纯前端按
+                     报价日期 + 有效天数 算；>7 天灰、≤7 天橙、已过期红 ✓ -->
+                <el-table-column label="有效期" width="120">
+                  <template #default="{ row: q }">
+                    <span v-if="!validityCell(q).ok" class="text-muted">—</span>
+                    <el-tooltip v-else :content="validityCell(q).tip" placement="top">
+                      <el-tag size="small" effect="plain" :type="validityCell(q).tagType">
+                        {{ validityCell(q).text }}
+                      </el-tag>
+                    </el-tooltip>
+                  </template>
+                </el-table-column>
                 <el-table-column label="含税合计" width="140" align="right">
                   <template #default="{ row: q }">
                     <span class="num">{{ money(q.total_with_tax) }}</span>
@@ -554,11 +674,22 @@ async function openSubsystems(row: Project): Promise<void> {
                 <el-table-column label="更新时间" min-width="150">
                   <template #default="{ row: q }">{{ dateTime(q.updated_at) }}</template>
                 </el-table-column>
-                <el-table-column label="操作" width="260" fixed="right">
+                <el-table-column label="操作" width="340" fixed="right">
                   <template #default="{ row: q }">
                     <div class="table-actions">
                       <el-button link type="primary" @click="openQuoteEditor(row.id, q.id)">
                         编制
+                      </el-button>
+                      <!-- 新增项报价单（2026-10-07 用户要求）：归档单尤其需要 ——
+                           归档后原单不可改，只能靠增项单接续 ✓ -->
+                      <el-button
+                        v-if="auth.can('quote', 'create')"
+                        link
+                        type="warning"
+                        :loading="addonBusy === q.id"
+                        @click="createAddonQuote(row, q)"
+                      >
+                        新增项报价单
                       </el-button>
                       <el-button
                         v-if="quoteCanSubmit(q)"

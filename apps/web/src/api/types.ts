@@ -461,6 +461,19 @@ export interface Quote {
   /** 本单自定义的说明条款 / 有效期（null = 用系统设置里那份） */
   clauses_override?: string[] | null
   valid_days_override?: number | null
+  /**
+   * 增项来源报价单（迁移 0040 的自引用外键）。
+   * 非空 = 本单是「增项自 <原单号>」；由后端 `POST /quotes` 带
+   * `based_on_quote_id` 建单时自动写入，界面只读不写。
+   */
+  based_on_quote_id?: string | null
+  /**
+   * 每单条款数字覆盖（valid_days / prepay_ratio / …）。
+   * 为空 = 继承「系统设置」；有效期的取值链见 utils/quoteValidity.ts。
+   */
+  terms_override?: Record<string, number | string> | null
+  /** 安装单价方式：manual=手填（缺省）/ quota=套定额 */
+  install_mode?: string
   customer_name: string | null
   customer_contact: string | null
   customer_phone: string | null
