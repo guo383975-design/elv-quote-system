@@ -652,6 +652,24 @@ _ENUM_RATE_FIELDS = {
 }
 
 
+def _assert_not_archived(quote: Quote) -> None:
+    """归档单**不允许任何写入**（2026-10-08 补）。
+
+    背景：_assert_editable 覆盖了「改内容」的入口 ✓，但 **POST /compute**（改费率并重算）
+    当时没调用它 ✗ → 归档单仍能通过接口改写费率 ✓（界面挡住了 ✓，接口没挡 ✗）。
+    口径刻意**窄**：只挡 archived ✓；approved 保持既有流程（允许有权限的人退回草稿再改 ✓），
+    与 _assert_not_archived_revert 的分工一致 ✓。
+    """
+    if str(quote.status) == str(QuoteStatus.ARCHIVED):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "归档的报价单不可修改（归档即定稿）。如需在此基础上增项，"
+                "请新建一张关联本单的报价单。"
+            ),
+        )
+
+
 def _assert_not_archived_revert(quote: Quote, new_status: object) -> None:
     """归档是不可逆的：不许把 archived 改回任何其它状态（2026-10-05 用户要求）。
 
@@ -1040,6 +1058,7 @@ async def compute(
     body: ComputeRequest | None = None,
 ) -> ComputeResult:
     quote = await _load_quote(db, quote_id)
+    _assert_not_archived(quote)   # 归档单不可写费率（2026-10-08 补）
     if body:
         data = body.model_dump(exclude_unset=True)
         # 必须在写入循环之前摘掉 version：它不是 Quote 的字段，

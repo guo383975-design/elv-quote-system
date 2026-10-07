@@ -81,11 +81,13 @@ export function validityInfo(
   if (!createdAt) return null
   const created = new Date(createdAt)
   if (Number.isNaN(created.getTime())) return null
-
   const days = Math.max(0, Math.trunc(validDays))
-  const start = localMidnight(created)
-  // 用「年月日 + 天数」构造，而不是加毫秒：跨月/跨年/夏令时都稳。
-  const validUntil = new Date(start.getFullYear(), start.getMonth(), start.getDate() + days)
+  // ⚠️ 起点口径必须与**后端导出 PDF**一致：export_data._quote_date 取的是
+  //   「创建时间在服务器本地的日历日」，而服务器时区实测为 **UTC** ✓
+  //   → 所以这里用 UTC 日历日 ✗ 不能用浏览器本地日（否则本地凌晨建的单会差一天 ✗，
+  //     项目列表那一列原先是本地日 → 与工作台/PDF 不一致，2026-10-08 统一过来 ✓）。
+  const start = new Date(Date.UTC(created.getUTCFullYear(), created.getUTCMonth(), created.getUTCDate()))
+  const validUntil = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate() + days))
   const remaining = Math.round(
     (validUntil.getTime() - localMidnight(now).getTime()) / DAY_MS,
   )

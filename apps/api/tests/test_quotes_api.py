@@ -2101,3 +2101,36 @@ async def test_addon_quote_inherits_non_default_rates(client, db, admin_headers)
             if qid:
                 await client.delete(f"/api/v1/quotes/{qid}", headers=admin_headers)
         await client.delete(f"/api/v1/projects/{pid}", headers=admin_headers)
+
+async def test_compute_rejects_archived_quote(client, db, admin_headers) -> None:
+    """归档单不允许改写费率（2026-10-08 补的接口层守卫）。
+
+    背景：界面挡住了 ✓ 但 **POST /compute** 当时没有守卫 ✗ → 归档单仍能通过接口改写费率 ✓。
+    这条测试走完整流转到 archived，再调 compute，要求 409 ✓。
+    """
+    from uuid import uuid4
+
+    code = f"PRJ-ARCH-{uuid4().hex[:6].upper()}"
+    r = await client.post("/api/v1/projects", json={"code": code, "name": "归档守卫回归", "customer_name": "自检"}, headers=admin_headers)
+    assert r.status_code == 201, r.text
+    pid = r.json()["id"]
+    qid = None
+    try:
+        r = await client.post("/api/v1/quotes", json={"project_id": pid, "title": "归档守卫"}, headers=admin_headers)
+        assert r.status_code == 201, r.text
+        qid = r.json()["id"]
+        for st in ("submitted", "reviewing", "approved", "archived"):
+            d = (await client.get(f"/api/v1/quotes/{qid}", headers=admin_headers)).json()
+            r = await client.patch(f"/api/v1/quotes/{qid}", json={"status": st, "version": d["version"]}, headers=admin_headers)
+            assert r.status_code == 200, (st, r.text)
+        # 归档后：compute 必须 409
+        r = await client.post(f"/api/v1/quotes/{qid}/compute", json={"tax_rate": "0.06"}, headers=admin_headers)
+        assert r.status_code == 409, r.text
+        # 退回草稿也必须 422（既有守卫）
+        d = (await client.get(f"/api/v1/quotes/{qid}", headers=admin_headers)).json()
+        r = await client.patch(f"/api/v1/quotes/{qid}", json={"status": "draft", "version": d["version"]}, headers=admin_headers)
+        assert r.status_code == 422, r.text
+    finally:
+        if qid:
+            await client.delete(f"/api/v1/quotes/{qid}", headers=admin_headers)
+        await client.delete(f"/api/v1/projects/{pid}", headers=admin_headers)
