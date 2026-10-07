@@ -57,6 +57,8 @@ const paper = ref<'A4-landscape' | 'A4-portrait'>('A4-landscape')
 //   · 所以 1mm ≈ 1068/273 px ✓，一页高 = 186 × 1068/273 ≈ 728px ✓
 const sheetRef = ref<HTMLElement | null>(null)
 const bottomRef = ref<HTMLElement | null>(null)
+/** 「—— 分页 ——」那段人工空白 ✓（量的时候要把它扣掉 ✓，见 measurePagination ✓） */
+const spacerRef = ref<HTMLElement | null>(null)
 const pageCount = ref(1)
 /** 报价说明+费用合计这一块要不要另起一页 ✓（剩余不足半页时 ✓） */
 const breakBeforeFees = ref(false)
@@ -152,6 +154,10 @@ function buildPagePlan(): void {
   push('末尾（报价说明+费用+签章）')
 
   pagePlanText.value = JSON.stringify(plan, null, 1)
+  // A 步骤②：把计划原文交给渲染 ✓（深拷贝成**普通数组** ✓ —— 计划里若混进响应式代理，
+  //   JSON.stringify 会丢内容 ✗，实测过 ✓）；有计划了才允许隐藏量尺纸 ✓。
+  pagePlanRaw.value = JSON.parse(JSON.stringify(plan)) as Array<Record<string, unknown>>
+  pagesReady.value = plan.length > 0
   // 页数以**计划**为准 ✓（2026-10-05 实测：按流的长度算会漏掉"插入的分页" ✗
   //   → 屏幕说 1 页、打印 2 页 ✓）。计划里最后一个 page 就是总页数 ✓。
   if (plan.length) pageCount.value = Number(plan[plan.length - 1].page)
@@ -170,9 +176,24 @@ function measurePagination(): void {
     pageCount.value = Math.max(1, Math.ceil((sheet.scrollHeight - 2) / pageH))
     return
   }
-  const topInSheet = bottom.offsetTop - sheet.offsetTop - parseFloat(
-    window.getComputedStyle(sheet).paddingTop,
-  )
+  // 用 getBoundingClientRect 求「块顶 → 纸内容顶」的距离 ✓（2026-10-05 A 步骤② 修正 ✓）：
+  //   量尺纸一旦被 .qp-measure-hidden 移出文档流（position: absolute ✓），
+  //   它的 offsetParent 就跟着变 ✓ → 原来的 bottom.offsetTop - sheet.offsetTop 是**跨坐标系相减** ✗
+  //   （算出来是垃圾值 ✓）。rect 是视口坐标 ✓，与定位方式无关 ✓。
+  //
+  // ⚠ 还要**扣掉自己插进去的那段空白**（.qp-break-spacer ✓），否则是个自反馈环 ✗：
+  //   加空白 → 这块被推到下一页的边界上 ✓ → 再量就变成"整页都空着" ✗ → 判定不用加 ✓
+  //     → 空白撤掉 ✓ → 又判定要加 ✓ …… 页面在两种状态之间无限抖动 ✓。
+  //   实测证据：同一份单子、同样数据，刷新两次分别量到 breakGap ≈ 0.008px 与 ≈ 196px ✓。
+  //   扣掉之后量到的就是**自然排布**位置 ✓，与加不加空白无关 ✓ → 一次收敛 ✓。
+  //
+  // 用 rect 的高度而**不是** offsetHeight ✗（后者会四舍五入到整数 ✓，扣不干净会留下零点几像素 ✓）。
+  const spacerH = spacerRef.value ? spacerRef.value.getBoundingClientRect().height : 0
+  const topInSheet =
+    bottom.getBoundingClientRect().top -
+    sheet.getBoundingClientRect().top -
+    parseFloat(window.getComputedStyle(sheet).paddingTop) -
+    spacerH
   const usedOnPage = topInSheet % pageH
   const remain = pageH - usedOnPage
   const need = bottom.offsetHeight
@@ -184,6 +205,10 @@ function measurePagination(): void {
   //   上一版直接用 sheet.scrollHeight ✗ → 把那段空白也算成内容 ✓ → 多报一页 ✓
   //   而打印时这段空白是 0 ✓（由真正的分页替代 ✓）→ 屏幕就比打印多一页 ✓✗
   const countBy = () => {
+    // 有分页计划时**以计划为准** ✓（2026-10-05 A 步骤② ✓）：
+    //   计划是唯一知道"此处要插一页"的地方 ✓；用纸的长度算会漏掉插入的那一页 ✗
+    //   → 屏幕说 1 页、打印 2 页 ✗（步骤①之前就是这个毛病 ✓）。
+    if (pageBoxes.value.length) return pageBoxes.value.length
     const gap = breakGap.value || 0
     return Math.max(1, Math.ceil((sheet.scrollHeight - gap - 2) / pageH))
   }
@@ -192,8 +217,150 @@ function measurePagination(): void {
     pageCount.value = countBy()
   })
 }
+
+/** 重量一次 ✓：断点/页数（measurePagination ✓）+ 分页计划（buildPagePlan ✓）。
+ *  换纸张、内容变、开关一动都要走这里 ✓ —— 少算一次，屏幕与打印就对不上 ✗。 */
+function refreshPages(): void {
+  measurePagination()
+  buildPagePlan()
+}
+
+// ==================== A 步骤②：把计划画成 N 张 A4 纸（2026-10-05 ✓）====================
+// 步骤①只算不画 ✓（屏幕上还是一整张长条纸 ✗ → 页码只能写死 "第 1 页" ✗）；
+// 这一步按计划**画**出来 ✓：N 个 .qp-page 纸盒、每页各自写页码 ✓，
+// 打印时一盒 = 一页 ✓（break-after: page ✓）→ 屏幕所见 = 打印所得 ✓。
+//
+// 计划原文用**普通数组**存 ✓（非响应式 ✓：响应式代理在 JSON.stringify 里会丢内容 ✗，实测过 ✓）：
+const pagePlanRaw = ref<Array<Record<string, unknown>>>([])
+/** 页盒就绪前，原来的 .qp-sheet 继续显示 ✓（数据没回来/计划为空时不至于整张空白 ✓） */
+const pagesReady = ref(false)
+
+/** 行描述：顺序必须与 DOM 里 .doc-table tbody tr 的顺序**完全一致** ✓
+ *  —— 步骤①量的就是那个顺序 ✓，错一个索引就整页错位 ✓。 */
+type RowDesc =
+  | { kind: 'group'; gi: number }
+  | { kind: 'item'; gi: number; ii: number }
+  | { kind: 'subtotal'; gi: number }
+  | { kind: 'grand' }
+  | { kind: 'empty' }
+
+const rowDescs = computed<RowDesc[]>(() => {
+  const out: RowDesc[] = []
+  if (!groups.value.length) return [{ kind: 'empty' }]
+  groups.value.forEach((g, gi) => {
+    out.push({ kind: 'group', gi })
+    g.items.forEach((_it, ii) => out.push({ kind: 'item', gi, ii }))
+    out.push({ kind: 'subtotal', gi })
+  })
+  out.push({ kind: 'grand' })
+  return out
+})
+
+/** 页盒里一行的**取值结果** ✓：数字/字符串全在脚本里算好 ✓。
+ *  模板只做展示 ✗ 不再碰 QuoteItem ✗（判别联合类型在模板里窄化不可靠 ✓，
+ *  那种"模板里类型对了但值取错"的坑，比多写几行脚本贵得多 ✓）。 */
+interface PageRow {
+  kind: RowDesc['kind']
+  /** group = 组标题（含「一、」前缀 ✓）；item = 名称 ✓；subtotal/grand = 标签 ✓ */
+  text: string
+  serial: number
+  /** 定额子目行 → 缩进显示 ✓ */
+  indent: boolean
+  brand: string
+  model: string
+  unit: string
+  quantity: number
+  equipmentUnit: number
+  installUnit: number
+  installAmount: number
+  unitPrice: number
+  amount: number
+  note: string
+}
+
+function toPageRow(d: RowDesc): PageRow {
+  const base: PageRow = {
+    kind: d.kind,
+    text: '',
+    serial: 0,
+    indent: false,
+    brand: '—',
+    model: '—',
+    unit: '',
+    quantity: 0,
+    equipmentUnit: 0,
+    installUnit: 0,
+    installAmount: 0,
+    unitPrice: 0,
+    amount: 0,
+    note: '—',
+  }
+  if (d.kind === 'group') {
+    const g = groups.value[d.gi]
+    return { ...base, text: g ? `${groupIndex(d.gi)}${g.title}` : '' }
+  }
+  if (d.kind === 'item') {
+    const it = groups.value[d.gi]?.items[d.ii]
+    // 索引越界不该**静默少一行** ✗：退回空行 ✓（页面上看得见 ✓），别把内容悄悄吃掉 ✓
+    if (!it) return { ...base, kind: 'empty' }
+    return {
+      ...base,
+      text: displayName(it),
+      serial: d.ii + 1,
+      indent: !!it.parent_item_id,
+      brand: it.brand || '—',
+      model: it.model || '—',
+      unit: it.unit,
+      quantity: toNum(it.quantity),
+      equipmentUnit: toNum(it.unit_price),
+      installUnit: toNum(it.install_unit_price),
+      installAmount: toNum(it.install_amount),
+      unitPrice: rowUnitPrice(it),
+      amount: rowAmount(it),
+      note: rowNote(it),
+    }
+  }
+  if (d.kind === 'subtotal') {
+    return { ...base, text: '小计', amount: groups.value[d.gi]?.subtotal ?? 0 }
+  }
+  if (d.kind === 'grand') {
+    return { ...base, text: '合计', amount: grandTotal.value }
+  }
+  return base
+}
+
+interface PageBox {
+  /** 页码 ✓（与计划里的 page 一致 ✓） */
+  index: number
+  /** 第 1 页才有抬头 + 信息表 ✓ */
+  head: boolean
+  showTable: boolean
+  rows: PageRow[]
+  /** 末页块：报价说明 + 费用合计 + 签章 ✓ */
+  tail: boolean
+}
+
+const pageBoxes = computed<PageBox[]>(() => {
+  const plan = pagePlanRaw.value
+  if (!plan.length) return []
+  const descs = rowDescs.value
+  return plan.map((p) => {
+    const idx = Number(p.page ?? 1)
+    const from = Number(p.rowFrom ?? -1)
+    const to = Number(p.rowTo ?? -2)
+    const rows =
+      from >= 0 && to >= from ? descs.slice(from, to + 1).map((d) => toPageRow(d)) : []
+    // 计划的 tail 文案以「签章）」结尾的就是末页块 ✓（见 buildPagePlan ✓）
+    const tail = String(p.tail ?? '').endsWith('签章）')
+    return { index: idx, head: idx === 1, showTable: rows.length > 0, rows, tail }
+  })
+})
+
 const showBrandModel = ref(true)
 const splitInstall = ref(false)
+// 这两个开关一变，列数就变 ✓ → 每行的高度跟着变 ✓（型号列一出现，行长可能从 1 行变 2 行 ✓）
+// → 分页计划必须**立刻重算** ✗ 否则页盒里还是旧计划 ✓：该分页的没分 ✗、行会溢出纸外 ✗。
+watch([showBrandModel, splitInstall], () => nextTick(refreshPages))
 
 /** 公司抬头来自「系统设置」（与 PDF 导出同一处），下面的常量只作接口未返回时的兜底。 */
 const COMPANY_FALLBACK = 'XX科技有限公司'
@@ -261,7 +428,7 @@ function applyPaper(): void {
 
 watch(paper, applyPaper)
 // 纸张/内容一变就重量分页 ✓（2026-10-05 ✓）
-watch(paper, () => nextTick(measurePagination))
+watch(paper, () => nextTick(refreshPages))
 // ⚠ 只在挂载时量一次是不够的（2026-10-05 实测抓到 ✓）：
 //   挂载那一刻**报价数据还没回来** ✓ → 纸是空的 ✓ → 页数恒为 1 ✗、
 //   "报价说明是否要另起一页"也恒为 false ✗（于是该换页的没换 ✓）。
@@ -269,24 +436,27 @@ watch(paper, () => nextTick(measurePagination))
 //   ⚠ 观察回调里必须**先比较再赋值** ✗ —— 否则"赋值→尺寸变→再触发"会自激死循环 ✓。
 let _ro: ResizeObserver | null = null
 onMounted(() => {
-  nextTick(measurePagination)
+  nextTick(refreshPages)
   // 字体就绪后再量 ✓（2026-10-05 实测：折行规则一改，行高就变 ✓，
   //   量早了算出来的"剩余半页"是错的 ✗ → 该换页的没换 ✓）
-  void document.fonts.ready.then(() => measurePagination())
-  setTimeout(measurePagination, 600)
-  setTimeout(measurePagination, 1500)
+  void document.fonts.ready.then(() => refreshPages())
+  setTimeout(refreshPages, 600)
+  setTimeout(refreshPages, 1500)
   setTimeout(() => {
-    measurePagination()
-    buildPagePlan()          // A 步骤①：同时算一份分页计划 ✓（只算不画 ✓）
+    refreshPages()           // A 步骤①：断点/页数 ✓ A 步骤②：分页计划 + 页盒 ✓
     // 把量到的关键数字挂到 window 上 ✓：便于"预览自检"脚本把真实几何打出来 ✓
     ;(window as unknown as Record<string, unknown>).__qpDebug = {
       pageH: pageContentHeight(),
       sheetH: sheetRef.value?.scrollHeight ?? 0,
-      bottomTop: bottomRef.value ? bottomRef.value.offsetTop - (sheetRef.value?.offsetTop ?? 0) : -1,
+      bottomTop: bottomRef.value
+        ? bottomRef.value.getBoundingClientRect().top -
+          (sheetRef.value?.getBoundingClientRect().top ?? 0)
+        : -1,
       blockH: bottomRef.value?.offsetHeight ?? 0,
       breakGap: breakGap.value,
       pageCount: pageCount.value,
       plan: pagePlanText.value,
+      pageBoxes: pageBoxes.value.length,
     }
   }, 2000)
   const el = sheetRef.value
@@ -294,8 +464,15 @@ onMounted(() => {
     _ro = new ResizeObserver(() => {
       const before = pageCount.value
       const beforeGap = breakGap.value
-      measurePagination()
-      if (pageCount.value === before && breakGap.value === beforeGap) return
+      const beforePlan = pagePlanText.value
+      refreshPages()
+      if (
+        pageCount.value === before &&
+        breakGap.value === beforeGap &&
+        pagePlanText.value === beforePlan
+      ) {
+        return
+      }
       // 值确实变了 → 允许下一次回调（尺寸变化是预期的 ✓）
     })
     _ro.observe(el)
@@ -522,10 +699,16 @@ function back(): void {
 
     <!-- ③ 文档（打印时只留这一块） -->
     <div class="qp-sheet-wrap">
+      <!-- 量尺纸（2026-10-05 A 步骤② ✓）：整张流**保留** ✓ ——
+           分页计划就是量它的真实几何算出来的 ✓（换纸张/内容一变就要重量 ✓）。
+           页盒一旦就绪就把它藏起来 ✓（用 visibility 不用 display ✗ —— display:none 量不到高度 ✗）。 -->
       <div
         ref="sheetRef"
         class="qp-sheet"
-        :class="paper === 'A4-portrait' ? 'portrait' : 'landscape'"
+        :class="[
+          paper === 'A4-portrait' ? 'portrait' : 'landscape',
+          { 'qp-measure-hidden': pagesReady },
+        ]"
       >
         <!-- 抬头 -->
         <div class="doc-head">
@@ -623,6 +806,7 @@ function back(): void {
              以前毫无说明 ✗ 看着像布局坏了 ✓ → 现在画一条虚线并标注 ✓；打印时隐藏 ✓。 -->
         <div
           v-if="breakGap"
+          ref="spacerRef"
           class="qp-break-spacer"
           :style="{ height: breakGap + 'px' }"
         >
@@ -664,6 +848,143 @@ function back(): void {
         <div class="doc-foot">
           第 1 页 / 共 {{ pageCount }} 页
         </div>
+      </div>
+
+      <!-- ==================== A 步骤②：N 张真实 A4 纸（2026-10-05 ✓）====================
+           一盒 = 一页 ✓：内容按分页计划切开 ✓，每页各自写页码 ✓，打印时 break-after: page ✓。
+           刻意**不设** overflow: hidden ✓ —— 万一计划与实际有偏差，宁可内容露出来看得见 ✓，
+           也不要被静默裁掉 ✓（客户版少一行明细是最坏的结果 ✓）。
+           注意：这里是 .qp-sheet-wrap 的**兄弟节点** ✓，没有去动量尺纸的结构 ✗。 -->
+      <div
+        v-for="pg in pageBoxes"
+        :key="pg.index"
+        class="qp-page"
+        :class="paper === 'A4-portrait' ? 'portrait' : 'landscape'"
+      >
+        <!-- 第 1 页：抬头 + 信息表 ✓（与量尺纸里逐字一致 ✓，只放在 v-if="pg.head" 里 ✓） -->
+        <template v-if="pg.head">
+          <div class="doc-head">
+            <div class="doc-company">
+              <div class="doc-brand">弱</div>
+              <div>
+                <div class="doc-company-name">{{ company.name }}</div>
+                <div class="doc-company-meta">{{ companyLine }}</div>
+              </div>
+            </div>
+            <div class="doc-title">智能化弱电工程报价单</div>
+          </div>
+
+          <div class="doc-info">
+            <div class="doc-info-item"><span>项目名称：</span><b>{{ project?.name ?? '—' }}</b></div>
+            <div class="doc-info-item"><span>报价单号：</span><b class="mono">{{ quote?.code }}</b></div>
+            <div class="doc-info-item"><span>客户名称：</span><b>{{ quote?.customer_name || project?.customer_name || '—' }}</b></div>
+            <div class="doc-info-item"><span>报价日期：</span><b>{{ quoteDate }}</b></div>
+            <div class="doc-info-item">
+              <span>联 系 人：</span>
+              <b>{{ quote?.customer_contact || project?.customer_contact || '—' }}　{{ quote?.customer_phone || project?.customer_phone || '' }}</b>
+            </div>
+            <div class="doc-info-item"><span>有效期至：</span><b>{{ validUntil }}</b></div>
+            <div class="doc-info-item"><span>工程地点：</span><b>{{ project?.address || '—' }}</b></div>
+            <div class="doc-info-item"><span>报价人：</span><b>{{ auth.displayName }}</b></div>
+          </div>
+        </template>
+
+        <!-- 明细表：只放**本页**的行 ✓（续页重复表头 ✓；td 结构与量尺纸里逐字一致 ✓） -->
+        <table v-if="pg.showTable" class="doc-table">
+          <thead>
+            <tr>
+              <th style="width: 46px">序号</th>
+              <th>设备 / 材料名称</th>
+              <th v-if="showBrandModel" style="width: 96px">品牌</th>
+              <th v-if="showBrandModel" style="width: 150px">型号规格</th>
+              <th style="width: 54px">单位</th>
+              <th style="width: 62px">数量</th>
+              <template v-if="splitInstall">
+                <th style="width: 84px">设备单价</th>
+                <th style="width: 84px">安装单价</th>
+                <th style="width: 84px">安装费</th>
+              </template>
+              <th v-else style="width: 92px">单价（元）</th>
+              <th style="width: 104px">合价（元）</th>
+              <th style="width: 84px">备注</th>
+            </tr>
+          </thead>
+          <tbody>
+            <template v-for="(pr, ri) in pg.rows" :key="ri">
+              <tr v-if="pr.kind === 'group'" class="group-row">
+                <td colspan="2" class="group-title">{{ pr.text }}</td>
+                <td :colspan="showBrandModel ? 3 : 1" />
+                <td />
+                <td :colspan="splitInstall ? 5 : 3" class="group-note">主材 + 安装调试</td>
+              </tr>
+              <tr v-else-if="pr.kind === 'item'">
+                <td class="c">{{ pr.serial }}</td>
+                <td>
+                <span v-if="pr.indent" class="text-muted">　　└ </span>{{ pr.text }}
+              </td>
+                <td v-if="showBrandModel">{{ pr.brand }}</td>
+                <td v-if="showBrandModel">{{ pr.model }}</td>
+                <td class="c">{{ pr.unit }}</td>
+                <td class="r num">{{ qty(pr.quantity) }}</td>
+                <template v-if="splitInstall">
+                  <td class="r num">{{ money(pr.equipmentUnit) }}</td>
+                  <td class="r num">{{ money(pr.installUnit) }}</td>
+                  <td class="r num">{{ money(pr.installAmount) }}</td>
+                </template>
+                <td v-else class="r num">{{ money(pr.unitPrice) }}</td>
+                <td class="r num">{{ money(pr.amount) }}</td>
+                <td class="c text-muted">{{ pr.note }}</td>
+              </tr>
+              <tr v-else-if="pr.kind === 'subtotal'" class="subtotal-row">
+                <td :colspan="showBrandModel ? 7 : 5" class="r">小计</td>
+                <td class="r num">{{ money(pr.amount) }}</td>
+                <td />
+              </tr>
+              <tr v-else-if="pr.kind === 'grand'" class="grand-row">
+                <td :colspan="(showBrandModel ? 5 : 3) + 1" class="r">合计</td>
+                <td :colspan="splitInstall ? 3 : 1" />
+                <td class="r num">{{ money(pr.amount) }}</td>
+                <td />
+              </tr>
+              <tr v-else>
+                <td :colspan="showBrandModel ? 9 : 7" class="c text-muted">这张报价单还没有明细</td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+
+        <!-- 末页块：报价说明 + 费用合计 + 签章 ✓（整块落在同一页 ✓ 不被截断 ✓） -->
+        <template v-if="pg.tail">
+          <div class="doc-bottom">
+            <div class="doc-clauses">
+              <div class="doc-section-title">报价说明</div>
+              <ol>
+                <li v-for="(c, i) in clauses" :key="i">{{ c }}</li>
+              </ol>
+            </div>
+            <div class="doc-fees">
+              <div v-for="f in feeRows" :key="f.label" class="doc-fee-row">
+                <span>{{ f.label }}</span><span class="num">{{ money(f.value) }}</span>
+              </div>
+              <div class="doc-fee-row">
+                <span>{{ taxLabel }}</span><span class="num">{{ money(quote?.tax_amount) }}</span>
+              </div>
+              <div class="doc-fee-row doc-fee-grand">
+                <span>报价合计（含税）</span>
+                <span class="num">¥ {{ money(quote?.total_with_tax) }}</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="doc-sign">
+            <div>报价单位（盖章）：</div>
+            <div>授权代表（签字）：</div>
+            <div>日期：{{ quoteDate }}</div>
+          </div>
+        </template>
+
+        <!-- 每页各自的页码 ✓（这正是本次任务要的东西 ✓） -->
+        <div class="doc-foot">第 {{ pg.index }} 页 / 共 {{ pageBoxes.length }} 页</div>
       </div>
     </div>
   </div>
@@ -738,9 +1059,12 @@ function back(): void {
   font-size: 11px;
 }
 
+/* 竖向排列 ✓（2026-10-05 A 步骤② ✓）：量尺纸 + N 张纸盒，一张一张往下摞 ✓ */
 .qp-sheet-wrap {
   display: flex;
-  justify-content: center;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
   padding-bottom: 20px;
 }
 
@@ -759,6 +1083,46 @@ function back(): void {
 
 .qp-sheet.portrait {
   width: 794px;
+}
+
+/* 量尺纸的隐藏（2026-10-05 A 步骤② ✓）：
+   用 visibility 而**不是** display ✗ —— display:none 之后 offsetHeight 全为 0 ✗，就量不到了 ✓。
+   移出文档流（position: absolute ✓）避免它占着屏幕最上面一大块 ✓。
+   ⚠ 移出流后它的 offsetParent 会变 ✓ → 量"块顶到纸顶"的距离必须改用 rect ✓（见 measurePagination ✓）。 */
+.qp-measure-hidden {
+  position: absolute;
+  left: -100000px;
+  top: 0;
+  visibility: hidden;
+}
+
+/* 纸盒：一张 = 一页 ✓（宽度与量尺纸一致 ✓ → 折行、行高一致 ✓ → 打印分页才对得上 ✓） */
+.qp-page {
+  background: #fff;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.14);
+  padding: 22px 26px 14px;
+  font-size: 12px;
+  color: #1f2937;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  /* 刻意的：不设 overflow: hidden ✓ —— 计划若与实际有偏差，内容要**露出来看得见** ✓，
+     而不是被静默裁掉 ✓（"打印少了几行"是客户版最坏的一类故障 ✓） */
+}
+
+.qp-page.landscape {
+  width: 1120px;
+  min-height: 728px;
+}
+
+.qp-page.portrait {
+  width: 794px;
+  min-height: 1030px;
+}
+
+/* 页码钉在纸张底部 ✓（margin-top: auto 把页脚推到底 ✓） */
+.qp-page > .doc-foot {
+  margin-top: auto;
 }
 
 .doc-head {
@@ -941,20 +1305,40 @@ function back(): void {
   text-align: center;
 }
 
-/* ---------- 打印：只留文档，工具条/外壳都隐藏 ---------- */
+/* ---------- 打印：只留 N 张纸，工具条/量尺纸/外壳都隐藏 ---------- */
 @media print {
   .no-print {
     display: none !important;
   }
 
   .qp-sheet-wrap {
+    display: block;
     padding: 0;
+    gap: 0;
   }
 
+  /* 量尺纸只用来测量 ✓ 打印时绝不能出现 ✗（否则每张纸后面还跟着一整张长条纸 ✓） */
   .qp-sheet {
+    display: none !important;
+  }
+
+  /* 一盒 = 一页 ✓（break-after: page ✓）；min-height 归零 ✓：
+     屏幕上的 728px 是"屏幕比例下的 A4 高" ✓，直接带去打印会比可打印区(约 703px)高 ✓
+     → 每页后面多出一张空白页 ✗（实测过的坑 ✓）。 */
+  .qp-page {
+    display: block;
     width: 100% !important;
+    min-height: 0 !important;
     box-shadow: none !important;
     padding: 0 !important;
+    break-after: page;
+    page-break-after: always;
+  }
+
+  /* 最后一页后面不要再补一张空白页 ✓ */
+  .qp-page:last-child {
+    break-after: auto;
+    page-break-after: auto;
   }
 }
 </style>
