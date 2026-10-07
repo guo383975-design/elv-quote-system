@@ -376,12 +376,38 @@ async def create_quote(
     # code/title 允许不传，由项目推导。前端「编制报价」只想给一个 project_id，
     # 强迫调用方先编出一个编号是没必要的门槛（以前这里是必填，导致 422，
     # 于是「编制报价」这个入口根本走不通）。
-    data = body.model_dump()
+    # ⚠ 必须 exclude_unset=True ✓：否则 Pydantic 的**默认值**也会进 data ✗，
+    #   下面「调用方没传就用系统设置 / 原单」的判断（data.get(_f) is None）永不成立 ✗。
+    #   2026-10-07 由前端 agent 用**非默认费率**的原单实测发现：增项单费率会被重置成默认 ✗
+    #   （套定额单增项会变成手工模式 ✗）。当年我用一张费率恰好全是默认值的原单验证，
+    #   所以没暴露 ✗ —— 回归测试必须用非默认值 ✓（见 test_addon_quote_inherits_non_default_rates）。
+    data = body.model_dump(exclude_unset=True)
     # 创建时把「系统设置 → 报价策略」里的费率落到本单（2026-10-05 用户决策④ ✓）：
     #   auxiliary_rate（辅材）/ mgmt_profit_rate（管理费+毛利）属于
     #   **创建报价时确定、之后不可改**的那一类 ✓。
     #   以前这里直接用模型里写死的默认值 ✗ → 系统设置改了不生效 ✓。
     #   调用方显式传了值就以调用方为准 ✓（将来创建界面可覆盖 ✓）。
+    # ---- 增项：从原单复制（2026-10-05 用户要求）----
+    _based_on = data.pop("based_on_quote_id", None)
+    # 这些字段来自原单（增项）→ 后面的「项目级费率快照」不得再覆盖它们 ✓
+    _from_src: set[str] = set()
+    _src: Quote | None = None
+    if _based_on:
+        _src = await db.get(Quote, _based_on)
+        if _src is None:
+            raise HTTPException(status_code=404, detail="增项来源的报价单不存在")
+        # 费率/条款快照：调用方显式传了就不覆盖 ✓（与本仓库"创建时定"的既有做法一致 ✓）
+        for _f in (
+            "tax_method", "tax_rate", "fee_base", "auxiliary_base", "auxiliary_rate",
+            "design_rate", "warranty_rate", "training_fee", "mgmt_profit_rate",
+            "labor_float_rate", "labor_float_per_class", "terms_override",
+            "valid_days_override", "install_mode",
+        ):
+            if data.get(_f) is None and getattr(_src, _f, None) is not None:
+                data[_f] = getattr(_src, _f)
+                _from_src.add(_f)
+
+
     _qs = (await load_settings(db) or {}).get("quote") or {}
     for _field in ("auxiliary_rate", "mgmt_profit_rate", "tax_rate", "labor_float_rate"):
         if data.get(_field) is None and _qs.get(_field) is not None:
@@ -405,23 +431,6 @@ async def create_quote(
     elif await db.scalar(select(Quote).where(Quote.code == code)):
         raise HTTPException(status_code=409, detail=f"报价单编号 {code} 已存在")
 
-    # ---- 增项：从原单复制（2026-10-05 用户要求）----
-    _based_on = data.pop("based_on_quote_id", None)
-    _src: Quote | None = None
-    if _based_on:
-        _src = await db.get(Quote, _based_on)
-        if _src is None:
-            raise HTTPException(status_code=404, detail="增项来源的报价单不存在")
-        # 费率/条款快照：调用方显式传了就不覆盖 ✓（与本仓库"创建时定"的既有做法一致 ✓）
-        for _f in (
-            "tax_method", "tax_rate", "fee_base", "auxiliary_base", "auxiliary_rate",
-            "design_rate", "warranty_rate", "training_fee", "mgmt_profit_rate",
-            "labor_float_rate", "labor_float_per_class", "terms_override",
-            "valid_days_override", "install_mode",
-        ):
-            if data.get(_f) is None and getattr(_src, _f, None) is not None:
-                data[_f] = getattr(_src, _f)
-
     data["code"] = code
     if not (data.get("title") or "").strip():
         data["title"] = f"{project.name} 报价单"
@@ -439,7 +448,7 @@ async def create_quote(
     provided = body.model_dump(exclude_unset=True)
     copied: list[str] = []
     for field in _PROJECT_RATE_FIELDS:
-        if field in provided:
+        if field in provided or field in _from_src:
             continue
         raw = getattr(project, field, None)
         if raw is None:

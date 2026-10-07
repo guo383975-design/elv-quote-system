@@ -416,7 +416,14 @@ async def test_optimistic_lock_rejects_stale_version(
         json={"version": stale, "tax_rate": "0.99"},
     )
     assert r.status_code == 409, r.text
-    assert "已被他人修改" in r.json()["detail"]
+    # 2026-10-07 改：409 的 detail 由**纯字符串**改为**结构化对象** ✓
+    #   （前端要拿 remote_changed / current_version 做"可合并"判断 ✗ 靠解析中文句子不可行 ✗）
+    detail = r.json()["detail"]
+    assert detail["error"] == "version_conflict", detail
+    assert detail["your_version"] == stale, detail
+    assert detail["current_version"] == stale + 1, detail
+    assert "这张单在你编辑期间被" in detail["message"], detail
+    assert "自动合并" in detail["message"], detail
     after = await _detail(client, admin_headers, q["id"])
     assert dec(after["tax_rate"]) == Decimal("0.11")
 
@@ -1897,7 +1904,9 @@ async def test_submit_notifies_approvers_not_submitter(
     hit = [n for n in mgr["items"] if n["kind"] == "approval_pending"]
     assert hit, mgr
     assert q["code"] in hit[0]["title"]
-    assert hit[0]["link"] == f"/quotes/{q['id']}"
+    # 2026-10-07 改：链接指向**真实路由** `/projects/<项目id>/workbench/<报价id>` ✓
+    #   原先写的是 `/quotes/<报价id>` ✗ —— 前端没有这条路由 ✗，点开是"页面不存在" ✗。
+    assert hit[0]["link"] == f"/projects/{p['id']}/workbench/{q['id']}"
 
     # 提交人自己不该收到"待审批"提醒（他没审批权）
     sales = (await client.get("/api/v1/notifications", headers=sh)).json()
@@ -2027,3 +2036,68 @@ async def test_strategy_rates_locked_after_creation(client, db, admin_headers):
     assert abs(float(got["tax_rate"]) - 0.06) < 1e-9, got
     assert abs(float(got["labor_float_rate"]) - 0.10) < 1e-9, got
     assert got["valid_days_override"] == 45, got
+
+async def test_addon_quote_inherits_non_default_rates(client, db, admin_headers) -> None:
+    """增项单必须继承原单的**非默认**费率/模式（2026-10-07 回归测试）。
+
+    为什么必须用非默认值 ✓：首版实现用的是 body.model_dump()（没有 exclude_unset）✗
+    → Pydantic 的默认值总会进 data → 「调用方没传就沿用原单」的判断永不成立 ✗ →
+    增项单的费率被静默重置成默认值 ✗（实测：原单 quota/6%/0.11… → 增项 manual/9%/0.06… ✗）。
+    当时用一张**恰好全是默认值**的原单验证，所以没暴露 ✗ —— 这条测试专门钉住非默认值 ✓。
+    """
+    from uuid import uuid4
+
+    code = f"PRJ-ADDON-{uuid4().hex[:6].upper()}"
+    r = await client.post(
+        "/api/v1/projects",
+        json={"code": code, "name": "增项复制回归", "customer_name": "自检"},
+        headers=admin_headers,
+    )
+    assert r.status_code == 201, r.text
+    pid = r.json()["id"]
+    src_id = add_id = None
+    try:
+        # 原单：**非默认**费率 + quota 模式
+        r = await client.post(
+            "/api/v1/quotes",
+            json={
+                "project_id": pid,
+                "title": "原单（非默认费率）",
+                "install_mode": "quota",
+                "tax_rate": "0.06",
+                "auxiliary_rate": "0.11",
+                "design_rate": "0.05",
+                "warranty_rate": "0.07",
+                "mgmt_profit_rate": "0.13",
+                "training_fee": "888",
+                "fee_base": "device_only",
+            },
+            headers=admin_headers,
+        )
+        assert r.status_code == 201, r.text
+        src = r.json()
+        src_id = src["id"]
+        # 增项单：只给 based_on_quote_id ✓ → 应继承原单的一切
+        r = await client.post(
+            "/api/v1/quotes",
+            json={"project_id": pid, "title": "增项", "based_on_quote_id": src_id},
+            headers=admin_headers,
+        )
+        assert r.status_code == 201, r.text
+        add = r.json()
+        add_id = add["id"]
+
+        assert add["based_on_quote_id"] == src_id, add
+        assert add["install_mode"] == "quota", add  # 若不修 bug，这里会是 manual ✗
+        assert Decimal(str(add["tax_rate"])) == Decimal("0.06"), add
+        assert Decimal(str(add["auxiliary_rate"])) == Decimal("0.11"), add
+        assert Decimal(str(add["design_rate"])) == Decimal("0.05"), add
+        assert Decimal(str(add["warranty_rate"])) == Decimal("0.07"), add
+        assert Decimal(str(add["mgmt_profit_rate"])) == Decimal("0.13"), add
+        assert Decimal(str(add["training_fee"])) == Decimal("888"), add
+        assert str(add["fee_base"]) == "device_only", add
+    finally:
+        for qid in (add_id, src_id):
+            if qid:
+                await client.delete(f"/api/v1/quotes/{qid}", headers=admin_headers)
+        await client.delete(f"/api/v1/projects/{pid}", headers=admin_headers)
