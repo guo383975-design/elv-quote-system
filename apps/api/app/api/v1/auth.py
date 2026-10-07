@@ -19,6 +19,7 @@ from app.core.permissions import Role, visible_resources
 from app.core.security import (
     create_access_token,
     hash_password,
+    hash_password_async,  # 改口令要用（2026-10-05 修 500 ✓）
     verify_password_async,
 )
 from app.db.session import get_db
