@@ -941,6 +941,7 @@ async function saveClauses(): Promise<void> {
       labor_float_rate: Number(laborFloatDraft.value) / 100,
     }
     await quoteApi.update(quoteId.value, payload as never)
+    clausesVisible.value = false      // 保存后自动关闭 ✓（落到打印/预览 ✓）
     ElMessage.success(
       useOwnClauses.value
         ? `本单已用自定义条款${Object.keys(termsOverride).length ? `（${Object.keys(termsOverride).length} 个数字本单生效 ✓）` : ''}`
@@ -1226,10 +1227,8 @@ async function confirmBatch(): Promise<void> {
 /** 滚到「报价说明条款」卡片（2026-10-05）✓
  *  它原先只出现在页面最下方 ✓（明细表 → 版本快照 → 才轮到它 ✗），
  *  用户找不到 ✓ → 加一个直达入口 ✓。 */
-function gotoClauses(): void {
-  const el = document.getElementById('quote-clauses')
-  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
-}
+// 「报价条款」现在是**弹窗**（2026-10-05 ✓）：不再滚动到页面底部 ✓
+const clausesVisible = ref(false)
 </script>
 
 <template>
@@ -1355,7 +1354,7 @@ function gotoClauses(): void {
           <el-button :loading="accLoading" @click="openAccessoryPicker(true)">
             <el-icon><Paperclip /></el-icon>&nbsp;配单检查
           </el-button>
-          <el-button type="primary" plain @click="gotoClauses">
+          <el-button type="primary" plain @click="clausesVisible = true">
             <el-icon><Document /></el-icon>&nbsp;报价条款
           </el-button>
           <el-button type="primary" :loading="aiSuggesting" @click="runAiSuggest">
@@ -1836,6 +1835,154 @@ function gotoClauses(): void {
             </el-button>
           </template>
         </el-dialog>
+
+      <!-- 报价条款弹窗（2026-10-05 用户反馈 ✓）：以前摊在页面底部**太长** ✗，
+           低分辨率不友好 ✓ → 改成点按钮弹窗 ✓；主报价界面不再显示 ✓。
+           不选条款 = 用系统默认条款 ✓（弹窗里选"继承系统设置条款"即可 ✓）。 -->
+      <el-dialog
+        v-model="clausesVisible"
+        title="报价条款（客户版）"
+        width="760px"
+        top="6vh"
+        append-to-body
+        class="clauses-dialog"
+      >
+        <div style="max-height: 66vh; overflow: auto; padding-right: 6px">
+      <div class="card" style="margin-top: 12px">
+        <div class="card-title">
+          报价说明条款（客户版）
+          <span class="text-muted">
+            · 默认用「系统设置」里那份；也可以只给这一张单自定义
+          </span>
+        </div>
+
+            <div v-if="standardClauses.length" class="mb">
+              <div class="text-muted" style="margin-bottom: 4px">
+                后台标准条款（**点一下即加入本单** ✓ / 再点移除 ✓；加入后会自动切到「本单自选条款」✓）：
+              </div>
+              <div>
+                <el-tag
+                  v-for="(c, i) in standardClauses"
+                  :key="i"
+                  :type="hasStandard(c) ? 'success' : 'info'"
+                  :effect="hasStandard(c) ? 'dark' : 'plain'"
+                  size="small"
+                  style="cursor: pointer; margin: 0 6px 6px 0"
+                  @click="toggleStandard(c)"
+                >
+                  {{ hasStandard(c) ? '✓ ' : '＋ ' }}{{ c.length > 34 ? c.slice(0, 34) + '…' : c }}
+                </el-tag>
+              </div>
+            </div>
+        <el-radio-group v-model="useOwnClauses" class="mb">
+          <el-radio :value="false">用系统设置（所有单共用）</el-radio>
+          <el-radio :value="true">本单自定义</el-radio>
+        </el-radio-group>
+
+        <template v-if="useOwnClauses">
+          <el-form label-width="110px" class="mb">
+            <el-form-item label="本单有效期">
+              <div class="st-terms">
+                <div class="st-term">
+                  <span>有效期（天）</span>
+                  <el-input-number v-model="termsDraft.valid_days" :min="1" :max="3650" :precision="0" size="small" />
+                </div>
+                <div class="st-term">
+                  <span>预付比例（%）</span>
+                  <el-input-number v-model="termsDraft.prepay_ratio" :min="0" :max="100" :precision="0" size="small" />
+                </div>
+                <div class="st-term">
+                  <span>验收后付款（%）</span>
+                  <el-input-number v-model="termsDraft.accept_ratio" :min="0" :max="100" :precision="0" size="small" />
+                </div>
+                <div class="st-term">
+                  <span>质保金（%）</span>
+                  <el-input-number v-model="termsDraft.warranty_ratio" :min="0" :max="100" :precision="0" size="small" />
+                </div>
+                <div class="st-term">
+                  <span>质保期（月）</span>
+                  <el-input-number v-model="termsDraft.warranty_months" :min="0" :max="120" :precision="0" size="small" />
+                </div>
+                <div class="st-term">
+                  <span>工期（日历天）</span>
+                  <el-input-number v-model="termsDraft.build_days" :min="1" :max="3650" :precision="0" size="small" />
+                </div>
+                <div class="text-muted" style="grid-column: 1 / -1; font-size: 12px">
+                  ↑ 这些数字改动**只对本单生效** ✓；条款文字里仍写 <code>{valid_days}</code> 这样的变量 ✓，
+                  导出时会自动替换成上面的值 ✓。
+                </div>
+              </div>
+              <span class="text-muted ml">天</span>
+            </el-form-item>
+          </el-form>
+
+          <div v-for="(_c, idx) in clausesDraft" :key="idx" class="st-clause">
+            <span class="st-no">{{ idx + 1 }}.</span>
+            <el-input v-model="clausesDraft[idx]" placeholder="条款文本，数字可用 {变量}" />
+            <el-button link :disabled="idx === 0" @click="moveClause(idx, -1)">↑</el-button>
+            <el-button link :disabled="idx === clausesDraft.length - 1"
+              @click="moveClause(idx, 1)">↓</el-button>
+            <el-button link type="danger" @click="clausesDraft.splice(idx, 1)">删</el-button>
+          </div>
+          <el-button size="small" @click="clausesDraft.push('')">+ 加一条</el-button>
+          <div class="text-muted" style="margin-top: 6px">
+            可用变量：
+            <code v-for="(label, name) in clausesData?.available_variables ?? {}" :key="name"
+              style="margin-right: 8px">{{ '{' + name + '}' }}={{ label }}</code>
+            —— 变量会在生成 PDF/预览时替换成本单实际数字
+          </div>
+        </template>
+
+        <div v-else-if="clausesData" class="text-muted">
+          当前生效：有效期 {{ clausesData.valid_days }} 天，
+          条款 {{ clausesData.clauses.length }} 条（在「系统设置 → 报价设置」里改）
+        </div>
+
+        <div v-if="clausesData" style="margin-top: 10px">
+          <b>客户版预览（替换变量后的样子）</b>
+          <ol class="clause-preview">
+            <li v-for="(c, i) in clausesData.clauses" :key="i">{{ c }}</li>
+          </ol>
+        </div>
+
+            <div class="mb" style="border-top: 1px dashed var(--el-border-color); padding-top: 8px">
+              <div class="text-muted" style="margin-bottom: 4px">
+                报价策略（本单生效 ✓，与条款一起在「保存条款设置」时提交 ✓）：
+              </div>
+              <div class="st-terms">
+                <div class="st-term">
+                  <span>计税方式</span>
+                  <el-select v-model="taxMethodDraft" size="small" style="width: 150px">
+                    <el-option label="一般计税 9%" value="general_9pct" />
+                    <el-option label="简易计税 3%" value="simple_3pct" />
+                  </el-select>
+                </div>
+                <div class="st-term">
+                  <span>税率（%）</span>
+                  <el-input-number v-model="taxRateDraft" :min="0" :max="100" :precision="0" size="small" />
+                </div>
+                <div class="st-term">
+                  <span>人工费浮动（%）</span>
+                  <el-input-number v-model="laborFloatDraft" :min="-50" :max="200" :precision="0" size="small" />
+                </div>
+              </div>
+            </div>
+        <el-button type="primary" :loading="clausesSaving" @click="saveClauses">保存条款设置</el-button>
+        <el-button @click="useOwnClauses = false; saveClauses()">恢复用系统设置</el-button>
+        <div v-if="clausesData?.clauses_overridden || clausesData?.valid_days_overridden"
+          class="text-muted" style="margin-top: 6px">
+          本单已自定义（不影响其它报价单）
+        </div>
+      </div>
+        </div>
+        <template #footer>
+          <el-button @click="clausesVisible = false">取消</el-button>
+          <el-button type="primary" :loading="clausesSaving" @click="saveClauses">
+            保存（落到打印 / 预览 ✓）
+          </el-button>
+        </template>
+      </el-dialog>
+
     <ApplyPointTemplateDialog
       v-model="applyTemplateVisible"
       :quote-id="quoteId"
@@ -2021,132 +2168,6 @@ function gotoClauses(): void {
       </template>
     </el-drawer>
 
-      <div id="quote-clauses" class="card" style="margin-top: 12px">
-        <div class="card-title">
-          报价说明条款（客户版）
-          <span class="text-muted">
-            · 默认用「系统设置」里那份；也可以只给这一张单自定义
-          </span>
-        </div>
-
-            <div v-if="standardClauses.length" class="mb">
-              <div class="text-muted" style="margin-bottom: 4px">
-                后台标准条款（**点一下即加入本单** ✓ / 再点移除 ✓；加入后会自动切到「本单自选条款」✓）：
-              </div>
-              <div>
-                <el-tag
-                  v-for="(c, i) in standardClauses"
-                  :key="i"
-                  :type="hasStandard(c) ? 'success' : 'info'"
-                  :effect="hasStandard(c) ? 'dark' : 'plain'"
-                  size="small"
-                  style="cursor: pointer; margin: 0 6px 6px 0"
-                  @click="toggleStandard(c)"
-                >
-                  {{ hasStandard(c) ? '✓ ' : '＋ ' }}{{ c.length > 34 ? c.slice(0, 34) + '…' : c }}
-                </el-tag>
-              </div>
-            </div>
-        <el-radio-group v-model="useOwnClauses" class="mb">
-          <el-radio :value="false">用系统设置（所有单共用）</el-radio>
-          <el-radio :value="true">本单自定义</el-radio>
-        </el-radio-group>
-
-        <template v-if="useOwnClauses">
-          <el-form label-width="110px" class="mb">
-            <el-form-item label="本单有效期">
-              <div class="st-terms">
-                <div class="st-term">
-                  <span>有效期（天）</span>
-                  <el-input-number v-model="termsDraft.valid_days" :min="1" :max="3650" :precision="0" size="small" />
-                </div>
-                <div class="st-term">
-                  <span>预付比例（%）</span>
-                  <el-input-number v-model="termsDraft.prepay_ratio" :min="0" :max="100" :precision="0" size="small" />
-                </div>
-                <div class="st-term">
-                  <span>验收后付款（%）</span>
-                  <el-input-number v-model="termsDraft.accept_ratio" :min="0" :max="100" :precision="0" size="small" />
-                </div>
-                <div class="st-term">
-                  <span>质保金（%）</span>
-                  <el-input-number v-model="termsDraft.warranty_ratio" :min="0" :max="100" :precision="0" size="small" />
-                </div>
-                <div class="st-term">
-                  <span>质保期（月）</span>
-                  <el-input-number v-model="termsDraft.warranty_months" :min="0" :max="120" :precision="0" size="small" />
-                </div>
-                <div class="st-term">
-                  <span>工期（日历天）</span>
-                  <el-input-number v-model="termsDraft.build_days" :min="1" :max="3650" :precision="0" size="small" />
-                </div>
-                <div class="text-muted" style="grid-column: 1 / -1; font-size: 12px">
-                  ↑ 这些数字改动**只对本单生效** ✓；条款文字里仍写 <code>{valid_days}</code> 这样的变量 ✓，
-                  导出时会自动替换成上面的值 ✓。
-                </div>
-              </div>
-              <span class="text-muted ml">天</span>
-            </el-form-item>
-          </el-form>
-
-          <div v-for="(_c, idx) in clausesDraft" :key="idx" class="st-clause">
-            <span class="st-no">{{ idx + 1 }}.</span>
-            <el-input v-model="clausesDraft[idx]" placeholder="条款文本，数字可用 {变量}" />
-            <el-button link :disabled="idx === 0" @click="moveClause(idx, -1)">↑</el-button>
-            <el-button link :disabled="idx === clausesDraft.length - 1"
-              @click="moveClause(idx, 1)">↓</el-button>
-            <el-button link type="danger" @click="clausesDraft.splice(idx, 1)">删</el-button>
-          </div>
-          <el-button size="small" @click="clausesDraft.push('')">+ 加一条</el-button>
-          <div class="text-muted" style="margin-top: 6px">
-            可用变量：
-            <code v-for="(label, name) in clausesData?.available_variables ?? {}" :key="name"
-              style="margin-right: 8px">{{ '{' + name + '}' }}={{ label }}</code>
-            —— 变量会在生成 PDF/预览时替换成本单实际数字
-          </div>
-        </template>
-
-        <div v-else-if="clausesData" class="text-muted">
-          当前生效：有效期 {{ clausesData.valid_days }} 天，
-          条款 {{ clausesData.clauses.length }} 条（在「系统设置 → 报价设置」里改）
-        </div>
-
-        <div v-if="clausesData" style="margin-top: 10px">
-          <b>客户版预览（替换变量后的样子）</b>
-          <ol class="clause-preview">
-            <li v-for="(c, i) in clausesData.clauses" :key="i">{{ c }}</li>
-          </ol>
-        </div>
-
-            <div class="mb" style="border-top: 1px dashed var(--el-border-color); padding-top: 8px">
-              <div class="text-muted" style="margin-bottom: 4px">
-                报价策略（本单生效 ✓，与条款一起在「保存条款设置」时提交 ✓）：
-              </div>
-              <div class="st-terms">
-                <div class="st-term">
-                  <span>计税方式</span>
-                  <el-select v-model="taxMethodDraft" size="small" style="width: 150px">
-                    <el-option label="一般计税 9%" value="general_9pct" />
-                    <el-option label="简易计税 3%" value="simple_3pct" />
-                  </el-select>
-                </div>
-                <div class="st-term">
-                  <span>税率（%）</span>
-                  <el-input-number v-model="taxRateDraft" :min="0" :max="100" :precision="0" size="small" />
-                </div>
-                <div class="st-term">
-                  <span>人工费浮动（%）</span>
-                  <el-input-number v-model="laborFloatDraft" :min="-50" :max="200" :precision="0" size="small" />
-                </div>
-              </div>
-            </div>
-        <el-button type="primary" :loading="clausesSaving" @click="saveClauses">保存条款设置</el-button>
-        <el-button @click="useOwnClauses = false; saveClauses()">恢复用系统设置</el-button>
-        <div v-if="clausesData?.clauses_overridden || clausesData?.valid_days_overridden"
-          class="text-muted" style="margin-top: 6px">
-          本单已自定义（不影响其它报价单）
-        </div>
-      </div>
 
     <!-- 分级审批（2026-10-04）：开启后"批准"要走完 N 级；这里显示进度与意见 -->
     <el-card
@@ -2194,6 +2215,9 @@ function gotoClauses(): void {
   </template>
 
 <style scoped>
+/* 报价条款弹窗（2026-10-05）：内容再长也不撑页面 ✓ */
+.clauses-dialog .el-dialog__body { padding-top: 8px; }
+
 .acc-block { border: 1px solid var(--el-border-color-lighter); border-radius: 6px;
   padding: 8px 10px; margin-bottom: 10px; }
 .acc-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
