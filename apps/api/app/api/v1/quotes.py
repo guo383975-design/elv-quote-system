@@ -739,16 +739,36 @@ async def update_quote(
                 quote_code=quote.code,
                 user_id=user.id,
                 action=AuditAction.UPDATE,
+                # 审计载荷必须**自建一份 JSON 安全的值** ✓（2026-10-05 连环踩坑后的结论 ✓）：
+                #   坑一：tax_rate 是 Decimal ✗ → 直接进审计 JSON 列会 500 ✗
+                #   坑二：拿 _normalize_jsonable 去转**含 data 引用**的字典 ✗
+                #          → 它会**就地**改字典 ✓ → 把还没写库的 data 也改了 ✗
+                #          → 存进库/返回接口的值变成 list ✗（测试 float() 直接炸 ✗）
+                #   → 所以这里逐个 str() 成新值 ✓，绝不触碰 data ✓
                 payload={
                     "changed": sorted(_changed),
-                    "clauses_override": _changed.get("clauses_override"),
-                    "terms_override": _changed.get("terms_override"),
-                    "valid_days_override": _changed.get("valid_days_override"),
+                    "clauses_override": [
+                        str(x) for x in (_changed.get("clauses_override") or [])
+                    ],
+                    "terms_override": {
+                        str(k): str(v)
+                        for k, v in (_changed.get("terms_override") or {}).items()
+                    },
+                    "valid_days_override": (
+                        None if _changed.get("valid_days_override") is None
+                        else str(_changed.get("valid_days_override"))
+                    ),
                     "tax": {
                         "method": _changed.get("tax_method"),
-                        "rate": _changed.get("tax_rate"),
+                        "rate": (
+                            None if _changed.get("tax_rate") is None
+                            else str(_changed.get("tax_rate"))
+                        ),
                     },
-                    "labor_float_rate": _changed.get("labor_float_rate"),
+                    "labor_float_rate": (
+                        None if _changed.get("labor_float_rate") is None
+                        else str(_changed.get("labor_float_rate"))
+                    ),
                 },
             )
         )
