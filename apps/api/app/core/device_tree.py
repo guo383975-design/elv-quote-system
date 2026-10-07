@@ -26,6 +26,10 @@ CODE_PREFIX_BY_CATEGORY: dict[str, str] = {
     "info_publish": "D",
     "power": "W",
     "accessory": "X",
+    # 电脑与办公设备（2026-10-07 新增的第 13 个一级分类）：T = 台式/电脑。
+    # 可用字母已排除 V A I C N B M S P D W X。
+    # 它生成的编号形如 T1001；缺这一项时新设备的 code_prefix 会是 NULL。
+    "computer": "T",
 }
 
 # 随种子交付的二级分类：一级分类取值 → [(节点 code, 中文名), …]

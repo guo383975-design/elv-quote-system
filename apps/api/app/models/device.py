@@ -48,6 +48,16 @@ class DeviceCategory(StrEnum):
     INFO_PUBLISH = "info_publish"      # 信息发布
     POWER = "power"                    # 电源/线缆
     ACCESSORY = "accessory"            # 辅材
+    # 2026-10-07：中天那本报价册带来一批电脑/办公设备（CPU/主板/显卡/显示器/
+    # 机箱/电源/键鼠…），上面 12 个弱电分类都装不下，所以加第 13 个一级分类。
+    #
+    # ⚠ 必须加在**最后**，两个原因：
+    #   1. 迁移 0004 用 `enumerate(DeviceCategory)` 给 12 个一级节点分配
+    #      sort_order；插在中间会让"全新建的库"和"升级上来的库"里一级分类
+    #      的顺序不一致；
+    #   2. 取值会进 PG 枚举类型 device_category，追加值最省事（PG 不支持删
+    #      枚举值，位置改了也没法干净回退）。
+    COMPUTER = "computer"              # 电脑与办公设备
 
 
 class DeviceStatus(StrEnum):

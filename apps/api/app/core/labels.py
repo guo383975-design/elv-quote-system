@@ -43,6 +43,9 @@ LABELS: dict[str, dict[str, str]] = {
         "info_publish": "信息发布",
         "power": "电源线缆",
         "accessory": "辅材",
+        # 2026-10-07 新增一级分类。⚠ 这一项不能漏：迁移 0038 建根节点时
+        # 名字取自 label_of("device_category", "computer")，缺了会建成无名节点。
+        "computer": "电脑与办公设备",
     },
     "role": {
         "admin": "系统管理员",
