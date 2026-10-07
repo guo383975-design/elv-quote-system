@@ -708,7 +708,8 @@ async function confirmAccessories(): Promise<void> {
     accPickVisible.value = false
     if (added) {
       ElMessage.success(`已加入 ${added} 行附件 ✓`)
-      await saveAndCompute()
+      // 明细写完 → 后端已重算 ✓（见 confirmOne 的说明）→ 拉最新数据 ✓
+      await reload()
     } else {
       ElMessage.info('没有勾选附件 ✓')
     }
@@ -880,6 +881,10 @@ async function saveAndCompute(): Promise<void> {
     await reload()
   } catch (e) {
     ElMessage.error(extractErrorMessage(e))
+    // 失败也要把界面拉回服务端真实状态 ✓：比如"写完明细立刻 compute"会因乐观锁
+    // 报 409（我们自己把 version 顶掉了 ✗），这时**不能**让界面停在旧数据上 ✗
+    // —— 用户看到的就是"子目行不出现 / 主行安装单价还是 0" ✗。
+    await reload()
   } finally {
     computing.value = false
   }
@@ -1053,7 +1058,9 @@ async function saveClauses(): Promise<void> {
         ? `本单已用自定义条款${Object.keys(termsOverride).length ? `（${Object.keys(termsOverride).length} 个数字本单生效 ✓）` : ''}`
         : '已恢复为系统设置里的条款',
     )
-    await saveAndCompute()          // 税率/浮动变了 → 金额要重算 ✗ 不然合计是旧值 ✓
+    // PATCH 本身就会重算费用瀑布 ✓（quotes.py update_quote → _recompute ✓），
+    // 所以这里只 reload() ✓；再调 compute 会因为 version 过期吃 409 ✗（见 confirmOne）。
+    await reload()
     await loadClauses()
   } catch (e) {
     ElMessage.error(e instanceof Error ? e.message : '保存失败')
@@ -1167,7 +1174,8 @@ async function onQuotaPicked(q: { code: string; name?: string }): Promise<void> 
       : { notes: withQuota(row.notes, q.code) })
     ElMessage.success(`已套定额 ${q.code}${q.name ? '（' + q.name + '）' : ''} ✓`)
   }
-  await saveAndCompute()
+  // 明细写完 → 后端已重算 ✓ → 拉最新数据即可 ✓（旧 version 去 compute 会 409 ✗，见 confirmOne）
+  await reload()
 }
 
 /** 设备单价（销售价）就地改（2026-10-05 用户要求 ✓）：
@@ -1175,7 +1183,9 @@ async function onQuotaPicked(q: { code: string; name?: string }): Promise<void> 
  *  实际卖多少由报价人自己填 ✓，所以必须可改 ✓。改完自动重算合计 ✓。 */
 async function onDevicePriceChange(row: { id: string }, v: number | undefined): Promise<void> {
   await quoteApi.updateItem(quoteId.value, row.id, { unit_price: v ?? 0 })
-  await saveAndCompute()
+  // 同 confirmOne：明细写完后端已重算 ✓；这里若调 compute 会因为 version 过期吃 409 ✗，
+  // 结果是"价格改了、界面却还显示旧值" ✗。
+  await reload()
 }
 
 /** 安装单价就地改（用户 ②：以前只能在编辑弹窗改 ✗）
@@ -1363,6 +1373,10 @@ async function applySuggestion(itemId: string): Promise<boolean> {
   if (!row) return false
   const cand = ((aiSuggest.value[itemId]?.suggestions ?? []) as Array<Record<string, any>>)
     .find((c) => String(c.code) === code)
+  // 候选查不到 = 这一行刚被单独确认过 ✓（confirmOne 只删 aiSuggest ✗ 留了 aiPicked ✗）
+  //   → 绝不能拿 undefined 去当"基价 0"落库 ✗（那会多出一条 0 元子目行 ✗，
+  //     批量确认时必然发生 ✗ —— 实测探针里就留下了这样一条 ✓）。
+  if (!cand) return false
   if (installMode.value === 'quota' && !row.parent_item_id) {
     // 定额模式 + 主设备行 → 定额子目行 ✓（主行只做**汇总展示** ✓ 见 installDisplay ✓）
     //  ⚠ 同一条主行再确认一次不许**再加一条**子目行 ✗（安装费会翻倍 ✗）：
@@ -1402,7 +1416,12 @@ async function confirmOne(itemId: string): Promise<void> {
     delete next[itemId]
     aiSuggest.value = next
     ElMessage.success('已确认该行定额 ✓')
-    await saveAndCompute()
+    // ⚠ 这里只能 reload() ✗ 不能 saveAndCompute()：
+    //   明细增删改**后端自己就会重算**（quotes.py add_item/update_item → _recompute ✓），
+    //   而 compute 要带 version ✗ —— 刚写完明细时本地 version 已经过期 ✗
+    //   → 乐观锁 409 → 原来的代码在 catch 里**不刷新** ✗
+    //   → 界面停在旧数据上：子目行不出现 ✓、主行安装单价还是 0 ✓（就是用户报的现象 ✓）。
+    await reload()
   }
 }
 
@@ -1416,7 +1435,8 @@ async function confirmBatch(): Promise<void> {
   aiPicked.value = {}
   aiSelected.value = []
   ElMessage.success(`批量直接确认 ${n} 行 ✓`)
-  await saveAndCompute()
+  // 同 confirmOne：明细写完后端已重算 ✓，这里只拉最新数据 ✓（带旧 version 去 compute 会 409 ✗）
+  await reload()
 }
 
 
