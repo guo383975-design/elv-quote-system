@@ -1,0 +1,39 @@
+# ---- 依赖与虚拟环境（绝不入库 ✗）----
+node_modules/
+.venv/
+__pycache__/
+*.py[cod]
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+
+# ---- 构建产物 ----
+dist/
+build/
+*.egg-info/
+
+# ---- 凭据/密钥（绝不入库 ✗✗）----
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*secret*
+*credential*
+
+# ---- 大体积资料/导出（源码仓库不放 ✗）----
+定额库提取/
+原型页面/
+样例输出/
+设备库导入_*.xls*
+pages/
+backups-offsite/
+*.zip
+*.xlsx
+*.pdf
+
+# ---- 编辑器/系统 ----
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

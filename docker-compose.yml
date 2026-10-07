@@ -1,0 +1,41 @@
+# 开发用基础设施：只起 PostgreSQL 16。
+# 后端/前端仍在宿主机上跑（uvicorn --reload / vite），改代码不用重建镜像。
+#
+#   docker compose up -d
+#   docker compose logs -f db
+#   docker compose down          # 保留数据卷
+#   docker compose down -v       # 连数据一起删
+#
+# 生产（内网私有部署）请自行按实际拓扑编排：nginx 反代 /api → api:8000。
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: quote-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: quote
+      # 开发默认口令（2026-10-04 改）：以前这里是 quote_dev_pwd，而**线上库口令恰好也是它**
+      # —— 开发默认值直接就是生产口令。现在两者解耦：想连线上必须显式给 POSTGRES_PASSWORD，
+      # 想在本地起 compose 用 quote_local_dev 就行。
+      # 生产环境的真实口令只在服务器 apps/api/.env 里，不进仓库、不写文档。
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-quote_local_dev}
+      POSTGRES_DB: quote_db
+      # 中文排序/比较要显式指定，否则 ORDER BY 中文名会按字节序排
+      POSTGRES_INITDB_ARGS: '--encoding=UTF8 --locale=C'
+      TZ: Asia/Shanghai
+    ports:
+      # ⚠ 只绑本机。以前写 '5432:5432' = 监听 0.0.0.0，
+      # 同一个网段里任何人都能用这个开发口令读写报价库。
+      - '127.0.0.1:5432:5432'
+    volumes:
+      - quote_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U quote -d quote_db']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  quote_pgdata:
+

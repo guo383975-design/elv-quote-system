@@ -1,0 +1,2136 @@
+<script setup lang="ts">
+import { http } from '@/api/client'
+/**
+ * 报价编制工作台 —— 按原型第 1 页版式重做（2026-10-03）。
+ *
+ * 版式依据：`原型第1页_版式蓝图.md` / `原型页面/proto-1.png`：
+ *   ② 项目信息条   ③ 工具栏（7 个操作 + 右侧统计）
+ *   ④ 左栏 子系统|小计       ④ 右栏 当前子系统的明细表
+ *   ⑤ 左栏下半 项目合计 + 对内成本毛利视图
+ *   ⑥ 底部常驻 费用汇总（含各费率与税金，报价合计在最右）
+ *
+ * 与原型「融合」的部分（原型没有、但必须保留的新功能）：
+ *   · 报价单状态机（提交审核 / 开始审核 / 批准 / 驳回 / 退回草稿）—— 原型是 9/28 做的，早于审批链
+ *   · 操作留痕抽屉（admin/finance）
+ *   · 成本/毛利仅对有成本权限的角色显示（后端也会二次把关）
+ *   · 已批准/已归档 = 锁定（编辑入口禁用）
+ * 原型有而后端未实现的操作（点位模板自动带安装单价、批量调价、复制到系统、套用模板）
+ * 一律**置灰 + 鼠标说明**，不做假按钮。
+ */
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { computed, onMounted, reactive, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+
+import AddDeviceDialog from '@/components/AddDeviceDialog.vue'
+import QuotaPickerDialog from '@/components/QuotaPickerDialog.vue'
+import ApplyPointTemplateDialog from '@/components/ApplyPointTemplateDialog.vue'
+import InquiryImportDialog from '@/components/InquiryImportDialog.vue'
+import QuoteItemDialog from '@/components/QuoteItemDialog.vue'
+import { deviceApi, projectApi, quoteApi, laborApi } from '@/api'
+import { extractErrorMessage } from '@/api/client'
+import type {
+  AuditLog,
+  Device,
+  Project,
+  QuoteCost,
+  QuoteDetail,
+  QuoteItem,
+  Subsystem,
+  SubsystemSummary,
+  QuoteRevision,
+  RevisionDiff,
+  ApprovalChain,
+} from '@/api/types'
+import { dateTime, money, percentInputToRatio, ratioToPercentInput, toNum } from '@/utils/format'
+import { useAuthStore } from '@/stores/auth'
+import { useMetaStore } from '@/stores/meta'
+
+const route = useRoute()
+const router = useRouter()
+const auth = useAuthStore()
+const meta = useMetaStore()
+
+const projectId = computed(() => String(route.params.projectId))
+const quoteId = computed(() => String(route.params.quoteId))
+
+const loading = ref(false)
+const project = ref<Project | null>(null)
+const quote = ref<QuoteDetail | null>(null)
+const subsystems = ref<Subsystem[]>([])
+const summary = ref<SubsystemSummary | null>(null)
+const cost = ref<QuoteCost | null>(null)
+const deviceTotal = ref(0)
+const warnings = ref<string[]>([])
+const computing = ref(false)
+const exporting = ref(false)
+const ratesDirty = ref(false)
+
+/** 当前选中的子系统（null = 全部）—— 原型左栏点击切换右栏明细。 */
+const currentSubsystemId = ref<string | null>(null)
+const selected = ref<QuoteItem[]>([])
+/** 右栏搜索框（原型 ④ 右栏「搜索名称 / 品牌 / 型号」）。 */
+const itemKeyword = ref('')
+const pickerVisible = ref(false)
+const itemDialogVisible = ref(false)
+/** 原型第 7 页：导入甲方询价清单（4 步向导）。 */
+const inquiryVisible = ref(false)
+/** 原型第 1 页：套用点位模板 / 批量添加点位。 */
+const applyTemplateVisible = ref(false)
+const editingItem = ref<QuoteItem | null>(null)
+const auditVisible = ref(false)
+const auditLogs = ref<AuditLog[]>([])
+
+// ----- 费率（原型 ⑥ 区：各费率就在汇总条上，可逐单覆盖）-----
+const rates = reactive({
+  tax_rate_pct: 9,
+  fee_base: 'device_aux_install',
+  auxiliary_base: 'device',
+  auxiliary_rate_pct: 6,
+  design_rate_pct: 2,
+  warranty_rate_pct: 3,
+  training_fee: 0,
+  mgmt_profit_rate_pct: 8,
+  labor_float_rate_pct: 0,
+  float_a_pct: 0,
+  float_b_pct: 0,
+  float_c_pct: 0,
+})
+
+function ratePayload(): Record<string, unknown> {
+  return {
+    version: quote.value?.version,
+    tax_rate: percentInputToRatio(rates.tax_rate_pct),
+    fee_base: rates.fee_base,
+    auxiliary_base: rates.auxiliary_base,
+    auxiliary_rate: percentInputToRatio(rates.auxiliary_rate_pct),
+    design_rate: percentInputToRatio(rates.design_rate_pct),
+    warranty_rate: percentInputToRatio(rates.warranty_rate_pct),
+    training_fee: rates.training_fee,
+    mgmt_profit_rate: percentInputToRatio(rates.mgmt_profit_rate_pct),
+    // 整体浮动 + 分类浮动（相加，见 AUDIT_REPORT §14）
+    labor_float_rate: percentInputToRatio(rates.labor_float_rate_pct),
+    labor_float_per_class: {
+      class_a: percentInputToRatio(rates.float_a_pct),
+      class_b: percentInputToRatio(rates.float_b_pct),
+      class_c: percentInputToRatio(rates.float_c_pct),
+    },
+  }
+}
+
+function syncRatesFromQuote(q: QuoteDetail): void {
+  const per = (q.labor_float_per_class ?? {}) as Record<string, number>
+  Object.assign(rates, {
+    tax_rate_pct: ratioToPercentInput(q.tax_rate),
+    fee_base: q.fee_base,
+    auxiliary_base: q.auxiliary_base,
+    auxiliary_rate_pct: ratioToPercentInput(q.auxiliary_rate),
+    design_rate_pct: ratioToPercentInput(q.design_rate),
+    warranty_rate_pct: ratioToPercentInput(q.warranty_rate),
+    training_fee: toNum(q.training_fee),
+    mgmt_profit_rate_pct: ratioToPercentInput(q.mgmt_profit_rate),
+    labor_float_rate_pct: ratioToPercentInput(q.labor_float_rate),
+    float_a_pct: ratioToPercentInput(per.class_a ?? 0),
+    float_b_pct: ratioToPercentInput(per.class_b ?? 0),
+    float_c_pct: ratioToPercentInput(per.class_c ?? 0),
+  })
+  ratesDirty.value = false
+}
+
+// ----- 权限与状态机（沿用旧编辑器的口径）-----
+const quoteStatus = computed(() => String(quote.value?.status ?? 'draft'))
+const locked = computed(() => ['approved', 'archived'].includes(quoteStatus.value))
+const canEdit = computed(() => auth.canWrite && !locked.value)
+const canApprove = computed(() => auth.can('quote', 'approve'))
+const canSeeAudit = computed(() => auth.can('audit_log', 'read'))
+const canExport = computed(() => auth.can('quote', 'export'))
+const waitingClaim = computed(() => quoteStatus.value === 'submitted')
+const inReview = computed(() => quoteStatus.value === 'reviewing')
+const canSubmit = computed(
+  () => auth.canWrite && ['draft', 'rejected'].includes(quoteStatus.value),
+)
+const canStartReview = computed(() => canApprove.value && waitingClaim.value)
+const canDecide = computed(() => canApprove.value && inReview.value)
+const statusChanging = ref(false)
+
+async function changeStatus(next: string, label: string, confirmText?: string): Promise<void> {
+  if (!quote.value) return
+  if (confirmText) {
+    const go = await ElMessageBox.confirm(confirmText, label, {
+      confirmButtonText: label,
+      cancelButtonText: '取消',
+      type: 'warning',
+    })
+      .then(() => true)
+      .catch(() => false)
+    if (!go) return
+  }
+  statusChanging.value = true
+  try {
+    await quoteApi.update(quote.value.id, { status: next, version: quote.value.version })
+    ElMessage.success(`已${label}`)
+    await reload()
+  } catch (e) {
+    ElMessage.error(extractErrorMessage(e))
+  } finally {
+    statusChanging.value = false
+  }
+}
+
+function onStatusCommand(cmd: string): void {
+  if (cmd === 'submitted') {
+    void changeStatus('submitted', '提交审核', '提交后进入待审批状态，确认提交？')
+  } else if (cmd === 'reviewing') {
+    void changeStatus('reviewing', '开始审核', '接手后由你批准或驳回（这是批准的前置条件）。确认接手？')
+  } else if (cmd === 'draft') {
+    void changeStatus('draft', '退回草稿', '退回草稿后这张单可以继续修改。确认退回？')
+  }
+}
+
+// ----- 数据加载 -----
+async function reload(): Promise<void> {
+  // 切换模式期间不许被并发 reload 覆盖 ✗（见 onModeChange 的说明 ✓）
+  if (!modeSaving) {
+    installMode.value = String((quote.value as { install_mode?: string } | null)?.install_mode ?? 'manual')
+  }
+  void loadQuotaInfo()
+  loading.value = true
+  try {
+    const [p, q, s, sum] = await Promise.all([
+      projectApi.get(projectId.value),
+      quoteApi.get(quoteId.value),
+      projectApi.subsystems(projectId.value),
+      quoteApi.subsystemSummary(quoteId.value).catch(() => null),
+    ])
+    project.value = p
+    quote.value = q
+    subsystems.value = s
+    summary.value = sum
+    syncRatesFromQuote(q)
+    if (auth.canSeeCost) {
+      // 无成本权限的角色这里会 403 —— 静默降级成"不显示"，不是错误
+      cost.value = await quoteApi.cost(quoteId.value).catch(() => null)
+    } else {
+      cost.value = null
+    }
+  } catch (e) {
+    ElMessage.error(extractErrorMessage(e))
+  } finally {
+    loading.value = false
+  }
+}
+
+async function loadDeviceTotal(): Promise<void> {
+  try {
+    const page = await deviceApi.list({ page: 1, page_size: 1 })
+    deviceTotal.value = page.total
+  } catch {
+    deviceTotal.value = 0
+  }
+}
+
+// ---------- 版本历史与对比（2026-10-04）----------
+const revDrawer = ref(false)
+const revLoading = ref(false)
+const revisions = ref<QuoteRevision[]>([])
+const revFrom = ref<number | null>(null)
+const revTo = ref<number | null>(null)
+const revDiff = ref<RevisionDiff | null>(null)
+
+const REASON_LABEL: Record<string, string> = {
+  submitted: '提交审核',
+  approved: '批准',
+  manual: '手动存档',
+}
+
+async function openRevisions(): Promise<void> {
+  revDrawer.value = true
+  revDiff.value = null
+  await loadRevisions()
+}
+
+async function loadRevisions(): Promise<void> {
+  revLoading.value = true
+  try {
+    revisions.value = await quoteApi.revisions(quoteId.value)
+    // 默认比"最近两版"，用户最常看的就是这个
+    if (revisions.value.length >= 2) {
+      revTo.value = revisions.value[0].seq
+      revFrom.value = revisions.value[1].seq
+      await runDiff()
+    }
+  } catch (e) {
+    ElMessage.error(extractErrorMessage(e))
+  } finally {
+    revLoading.value = false
+  }
+}
+
+async function runDiff(): Promise<void> {
+  if (revFrom.value === null || revTo.value === null) return
+  if (revFrom.value === revTo.value) {
+    ElMessage.warning('请选择两个不同的版本')
+    return
+  }
+  try {
+    revDiff.value = await quoteApi.diffRevisions(quoteId.value, revFrom.value, revTo.value)
+  } catch (e) {
+    ElMessage.error(extractErrorMessage(e))
+  }
+}
+
+async function saveRevisionNow(): Promise<void> {
+  try {
+    const { value } = await ElMessageBox.prompt('给这一版起个名字（选填）：', '保存当前版本', {
+      confirmButtonText: '保存',
+      cancelButtonText: '取消',
+      inputPlaceholder: '如：甲方砍价后',
+    })
+    const r = await quoteApi.saveRevision(quoteId.value, value || undefined)
+    ElMessage.success(`已保存为第 ${r.seq} 版`)
+    await loadRevisions()
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error(extractErrorMessage(e))
+  }
+}
+
+// ---------- 分级审批（2026-10-04）----------
+const approval = ref<ApprovalChain | null>(null)
+
+/** 审批链只在"审批中"才需要显示；其余状态不拉这个接口，省一跳。 */
+async function loadApproval(): Promise<void> {
+  const st = quote.value?.status
+  if (st !== 'submitted' && st !== 'reviewing') {
+    approval.value = null
+    return
+  }
+  try {
+    approval.value = await quoteApi.approvals(quoteId.value)
+  } catch {
+    approval.value = null
+  }
+}
+
+async function decide(decision: 'approved' | 'rejected'): Promise<void> {
+  const isReject = decision === 'rejected'
+  let comment: string | undefined
+  try {
+    const { value } = await ElMessageBox.prompt(
+      isReject
+        ? '驳回必须写明意见（改什么、为什么），否则对方不知道从哪改：'
+        : '审批意见（选填）：',
+      isReject ? '驳回报价单' : '通过本级审批',
+      {
+        confirmButtonText: isReject ? '驳回' : '通过',
+        cancelButtonText: '取消',
+        inputPlaceholder: isReject ? '如：单价低于底价，请重新核价' : '如：造价复核通过',
+        inputValidator: (v: string) =>
+          !isReject || (v && v.trim().length >= 2) || '驳回必须写意见',
+      },
+    )
+    comment = value?.trim() || undefined
+  } catch {
+    return
+  }
+  try {
+    const r = await quoteApi.decideApproval(quoteId.value, decision, comment)
+    if (r.finalized) ElMessage.success('审批已全部通过，报价单已批准')
+    else if (decision === 'rejected') ElMessage.warning('已驳回，单据退回')
+    else ElMessage.success(`第 ${r.level} 级已通过，继续等待后续审批`)
+    await reload()
+    await loadApproval()
+  } catch (e) {
+    ElMessage.error(extractErrorMessage(e))
+  }
+}
+
+onMounted(async () => {
+  await Promise.all([meta.load(), reload(), loadDeviceTotal()])
+  await loadApproval()
+})
+
+// ----- 明细 -----
+const items = computed<QuoteItem[]>(() => quote.value?.items ?? [])
+
+const visibleItems = computed<QuoteItem[]>(() => {
+  let list = currentSubsystemId.value
+    ? items.value.filter((i) => i.subsystem_id === currentSubsystemId.value)
+    : items.value
+  const kw = itemKeyword.value.trim().toLowerCase()
+  if (kw) {
+    list = list.filter((i) =>
+      [i.name, i.brand ?? '', i.model ?? '', i.device_code ?? '']
+        .some((f) => String(f).toLowerCase().includes(kw)),
+    )
+  }
+  return list
+})
+
+/** 原型 ④ 右栏的快捷筛选 chips（取前 8 个子系统，点一下就切换筛选）。 */
+const quickChips = computed(() => subsystemRows.value.slice(0, 8))
+
+const subsystemName = computed(() => {
+  const m = new Map<string, string>()
+  for (const s of subsystems.value) {
+    m.set(s.id, s.custom_name || meta.label('subsystem_type', s.subsystem_type))
+  }
+  return m
+})
+
+const subsystemOptions = computed(() =>
+  subsystems.value.map((s) => ({
+    id: s.id,
+    name: s.custom_name || meta.label('subsystem_type', s.subsystem_type),
+  })),
+)
+
+/** 左栏：子系统 + 小计（原型 ④ 左栏；没有明细的子系统也列出来，便于补齐）。 */
+const subsystemRows = computed(() => {
+  const rows = (summary.value?.subsystems ?? []).map((r) => ({
+    id: r.subsystem_id,
+    name: r.name || subsystemName.value.get(r.subsystem_id) || '未命名子系统',
+    amount: r.amount,
+    point_count: r.point_count,
+  }))
+  const known = new Set(rows.map((r) => r.id))
+  for (const s of subsystems.value) {
+    if (!known.has(s.id)) {
+      rows.push({
+        id: s.id,
+        name: s.custom_name || meta.label('subsystem_type', s.subsystem_type),
+        amount: 0,
+        point_count: 0,
+      })
+    }
+  }
+  return rows
+})
+
+const stats = computed(() => ({
+  subsystems: subsystemRows.value.length,
+  items: items.value.length,
+  points: subsystemRows.value.reduce((sum, r) => sum + (r.point_count || 0), 0),
+}))
+
+const currentRows = computed(() =>
+  currentSubsystemId.value
+    ? subsystemRows.value.filter((r) => r.id === currentSubsystemId.value)
+    : [],
+)
+const currentEquipment = computed(() =>
+  currentRows.value.reduce((s, r) => s + r.amount, 0),
+)
+
+const discontinuedCount = computed(
+  () => items.value.filter((i) => i.device_status && meta.isDiscontinued(i.device_status)).length,
+)
+
+function selectSubsystem(id: string | null): void {
+  currentSubsystemId.value = id
+}
+
+function onSelectionChange(rows: QuoteItem[]): void {
+  // AI 预套：把勾选的行记下来（批量确认用 ✓，不影响原有逻辑 ✓）
+  aiSelected.value = (rows ?? []).map((r: { id: unknown }) => String(r.id))
+  selected.value = rows
+}
+
+async function onQuantityChange(row: QuoteItem, value: number | undefined): Promise<void> {
+  if (value === undefined || value === null) return
+  try {
+    await quoteApi.updateItem(quoteId.value, row.id, { quantity: value })
+    await reload()
+  } catch (e) {
+    ElMessage.error(extractErrorMessage(e))
+    await reload()
+  }
+}
+
+function openItemDialog(item: QuoteItem | null): void {
+  editingItem.value = item
+  itemDialogVisible.value = true
+}
+
+/**
+ * 低于底价时的放行交互（2026-10-04）。
+ *
+ * 后端会拦"低于设备底价"的报价：只有经理/管理员 + 写明理由才放行。
+ * 这里把那次 422 变成"问一句理由"而不是一句干巴巴的报错 ——
+ * 否则这条控制从界面上根本走不通，用户只会以为系统坏了。
+ */
+
+/** 辅材单价（按工程量口径）：改完要重算，否则表格里的辅材费不动。 */
+async function onAuxUnitChange(row: QuoteItem, value: number | undefined): Promise<void> {
+  const v = value ?? 0
+  if (toNum(row.auxiliary_unit_price) === v) return
+  try {
+    await quoteApi.updateItem(quoteId.value, row.id, { auxiliary_unit_price: v })
+    await reload()
+  } catch (e) {
+    ElMessage.error(extractErrorMessage(e))
+  }
+}
+
+async function confirmBelowFloor(detail: string): Promise<string | null> {
+  try {
+    const { value } = await ElMessageBox.prompt(
+      `${detail}\n\n请填写放行理由（会记入操作留痕）：`,
+      '低于底价，需要授权',
+      {
+        confirmButtonText: '放行',
+        cancelButtonText: '取消',
+        inputPlaceholder: '如：甲方年度框架协议价，已口头批准',
+        inputValidator: (v: string) => (v && v.trim().length >= 2) || '理由不能为空',
+      },
+    )
+    return value?.trim() ?? null
+  } catch {
+    return null
+  }
+}
+
+function isFloorError(e: unknown): boolean {
+  const msg = extractErrorMessage(e)
+  return msg.includes('底价')
+}
+
+async function onPick(payload: { devices: Device[]; subsystemId: string | null }): Promise<void> {
+  let added = 0
+  let failed = 0
+  for (const device of payload.devices) {
+    try {
+      await quoteApi.addItem(quoteId.value, {
+        device_id: device.id,
+        subsystem_id: payload.subsystemId,
+        name: device.name,
+        brand: device.brand,
+        model: device.model,
+        unit: device.unit,
+        quantity: 1,
+        unit_price: device.reference_price,
+        install_unit_price: device.install_unit_price,
+      })
+      added += 1
+    } catch {
+      failed += 1
+    }
+  }
+  if (added) ElMessage.success(`已加入 ${added} 行`)
+  if (failed) ElMessage.warning(`${failed} 行加入失败（可能已停产或数据不完整）`)
+  await reload()
+}
+
+/** 原型第 2 页第三个页签：手动录入的设备 / 材料，直接作为一行加入本报价单。 */
+async function onManualAdd(payload: Record<string, unknown>): Promise<void> {
+  const body: Record<string, unknown> = {
+    ...payload,
+    subsystem_id: payload.subsystem_id ?? currentSubsystemId.value,
+  }
+  try {
+    await quoteApi.addItem(quoteId.value, body)
+    ElMessage.success(`已加入：${String(payload.name ?? '')}`)
+    await reload()
+  } catch (e) {
+    // 低于底价 → 问一句理由再试一次（经理/管理员才放得过去，后端把关）
+    if (!isFloorError(e)) {
+      ElMessage.error(extractErrorMessage(e))
+      return
+    }
+    const reason = await confirmBelowFloor(extractErrorMessage(e))
+    if (!reason) return
+    try {
+      await quoteApi.addItem(quoteId.value, { ...body, below_floor_reason: reason })
+      ElMessage.success(`已按授权价加入：${String(payload.name ?? '')}`)
+      await reload()
+    } catch (e2) {
+      ElMessage.error(extractErrorMessage(e2))
+    }
+  }
+}
+
+/**
+ * 原型报价页的「复制到系统」：把勾选的行**收进企业设备库**。
+ * 库里本来就有（device_id 非空）或同型号已存在的行会被后端跳过并说明原因。
+ */
+async function promoteToLibrary(): Promise<void> {
+  if (!selected.value.length) return
+  const go = await ElMessageBox.confirm(
+    `把勾选的 ${selected.value.length} 行收进企业设备库？\\n\\n` +
+      '· 已经来自设备库的行会被跳过；\\n' +
+      '· 型号已存在的行也会跳过（避免库里出现重复型号）；\\n' +
+      '· 新建设备会按分类自动编号。',
+    '复制到设备库',
+    { confirmButtonText: '收进设备库', cancelButtonText: '取消', type: 'info' },
+  )
+    .then(() => true)
+    .catch(() => false)
+  if (!go) return
+  try {
+    const res = await deviceApi.fromQuoteItems(selected.value.map((r) => r.id))
+    if (res.created_count) {
+      ElMessage.success(
+        `已收进设备库 ${res.created_count} 个：` +
+          res.created.map((c) => `${c.code} ${c.name}`).join('、'),
+      )
+    }
+    if (res.skipped_count) {
+      ElMessageBox.alert(
+        res.skipped.map((s) => `${s.name}：${s.reason}`).join('\\n'),
+        `跳过 ${res.skipped_count} 行`,
+        { confirmButtonText: '知道了', type: 'warning' },
+      ).catch(() => undefined)
+    }
+    if (!res.created_count && !res.skipped_count) {
+      ElMessage.info('没有可收进设备库的行')
+    }
+  } catch (e) {
+    ElMessage.error(extractErrorMessage(e))
+  }
+}
+
+async function removeSelected(): Promise<void> {
+  if (!selected.value.length) return
+  const go = await ElMessageBox.confirm(
+    `确认删除选中的 ${selected.value.length} 行？`,
+    '删除明细',
+    { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' },
+  )
+    .then(() => true)
+    .catch(() => false)
+  if (!go) return
+  for (const row of selected.value) {
+    await quoteApi.removeItem(quoteId.value, row.id).catch(() => undefined)
+  }
+  ElMessage.success('已删除')
+  await reload()
+}
+
+async function removeRow(row: QuoteItem): Promise<void> {
+  const go = await ElMessageBox.confirm(`删除「${row.name}」这一行？`, '删除明细', {
+    confirmButtonText: '删除',
+    cancelButtonText: '取消',
+    type: 'warning',
+  })
+    .then(() => true)
+    .catch(() => false)
+  if (!go) return
+  await quoteApi.removeItem(quoteId.value, row.id)
+  await reload()
+}
+
+/** 进「客户版预览」页（原型第 3 页）—— 送客户前先在这里确认。 */
+function goPreview(): void {
+  void router.push({
+    name: 'quote-preview',
+    params: { projectId: projectId.value, quoteId: quoteId.value },
+  })
+}
+
+/** 进「人工费设置」页（原型第 4 页）—— 报价单级的人工费浮动都在那里改。 */
+function goLaborSetting(): void {
+  void router.push({
+    name: 'quote-labor',
+    params: { projectId: projectId.value, quoteId: quoteId.value },
+  })
+}
+
+async function goSubsystems(): Promise<void> {
+  await router.push({ name: 'project-subsystems', params: { projectId: projectId.value } })
+}
+
+// ----- 费率与重算 -----
+function onRateChange(): void {
+  ratesDirty.value = true
+}
+
+async function saveAndCompute(): Promise<void> {
+  computing.value = true
+  try {
+    const res = await quoteApi.compute(quoteId.value, ratePayload())
+    warnings.value = res.warnings ?? []
+    ElMessage.success('已按当前费率重算')
+    await reload()
+  } catch (e) {
+    ElMessage.error(extractErrorMessage(e))
+  } finally {
+    computing.value = false
+  }
+}
+
+
+// ----- 报价说明条款（2026-10-05）-----
+// 默认用「系统设置」里那份；也可以**只给这一张单**自定义条款与有效期，
+// 不污染其它报价单（后端 quotes.clauses_override / valid_days_override）。
+const clausesData = ref<{
+  clauses: string[]
+  clause_template: string[]
+  valid_days: number
+  variables: Record<string, string | number>
+  available_variables: Record<string, string>
+  clauses_overridden: boolean
+  valid_days_overridden: boolean
+} | null>(null)
+const clausesDraft = ref<string[]>([])
+const validDaysDraft = ref<number>(30)
+const useOwnClauses = ref(false)
+const clausesSaving = ref(false)
+
+function moveClause(idx: number, delta: number): void {
+  const target = idx + delta
+  if (target < 0 || target >= clausesDraft.value.length) return
+  const [row] = clausesDraft.value.splice(idx, 1)
+  clausesDraft.value.splice(target, 0, row)
+}
+
+async function loadClauses(): Promise<void> {
+  if (!quoteId.value) return
+  try {
+    const d = await quoteApi.exportClauses(quoteId.value)
+    clausesData.value = d as never
+    clausesDraft.value = [...(d.clauses ?? [])]
+    validDaysDraft.value = d.valid_days ?? 30
+    useOwnClauses.value = !!(d.clauses_overridden || d.valid_days_overridden)
+  } catch {
+    clausesData.value = null
+  }
+}
+
+async function saveClauses(): Promise<void> {
+  if (!quoteId.value) return
+  clausesSaving.value = true
+  try {
+    const payload = useOwnClauses.value
+      ? {
+          clauses_override: clausesDraft.value.map((c) => c.trim()).filter(Boolean),
+          valid_days_override: validDaysDraft.value,
+        }
+      : { clauses_override: null, valid_days_override: null }
+    await quoteApi.update(quoteId.value, payload as never)
+    ElMessage.success(useOwnClauses.value ? '本单已用自定义条款' : '已恢复为系统设置里的条款')
+    await loadClauses()
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : '保存失败')
+  } finally {
+    clausesSaving.value = false
+  }
+}
+
+// ----- 导出 / 打印 -----
+async function onExport(format: 'xlsx' | 'pdf', internal: boolean): Promise<void> {
+  exporting.value = true
+  try {
+    const { blob, filename } = await quoteApi.exportFile(quoteId.value, format, internal)
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    a.click()
+    URL.revokeObjectURL(url)
+    ElMessage.success(internal ? `已导出内部版：${filename}` : `已导出：${filename}`)
+  } catch (e) {
+    ElMessage.error(extractErrorMessage(e))
+  } finally {
+    exporting.value = false
+  }
+}
+
+function onPrint(): void {
+  window.print()
+}
+
+// ----- 留痕 -----
+async function openAudit(): Promise<void> {
+  auditVisible.value = true
+  try {
+    auditLogs.value = await quoteApi.auditLogs(quoteId.value, 100)
+  } catch (e) {
+    ElMessage.error(extractErrorMessage(e))
+  }
+}
+
+const feeBaseLabel = computed(
+  () => meta.options('fee_base').find((o) => o.value === rates.fee_base)?.label ?? rates.fee_base,
+)
+
+// ==================== 定额套用 / 安装单价就地编辑（2026-10-05）====================
+const QUOTA_MARK = 'quota:'
+
+/** 从备注里取定额编号（口径与后端 parse_quota_code 一致 ✓） */
+function quotaOf(row: { notes?: string | null }): string {
+  const notes = row?.notes || ''
+  const i = notes.indexOf(QUOTA_MARK)
+  if (i < 0) return ''
+  return notes.slice(i + QUOTA_MARK.length).trim().split(/\s+/)[0] || ''
+}
+
+/** 把定额写回备注：保留其它说明 ✓、替换旧的 quota:xxx ✓ */
+function withQuota(notes: string | null | undefined, code: string): string {
+  const kept = (notes || '')
+    .split(/\s+/)
+    .filter((w) => w && !w.startsWith(QUOTA_MARK))
+    .join(' ')
+  return [kept, code ? `${QUOTA_MARK}${code}` : ''].filter(Boolean).join(' ')
+}
+
+const quotaInfo = ref<Record<string, { base_price?: string; labor_b_day?: string }>>({})
+
+/** 定额索引（编号 → 基价/工日）✓：套定额后要能直接看到基价 ✓ */
+async function loadQuotaInfo(): Promise<void> {
+  if (Object.keys(quotaInfo.value).length) return
+  try {
+    const rows = (await laborApi.quotaItems()) as unknown as Array<Record<string, unknown>>
+    const map: Record<string, { base_price?: string; labor_b_day?: string }> = {}
+    for (const r of rows) {
+      map[String(r.code)] = {
+        base_price: String(r.base_price ?? ''),
+        labor_b_day: String(r.labor_b_day ?? ''),
+      }
+    }
+    quotaInfo.value = map
+  } catch {
+    /* 拉不到就不显示基价，不影响套定额 ✓ */
+  }
+}
+
+const quotaPickVisible = ref(false)
+const quotaTarget = ref<{ id: string; notes?: string | null } | null>(null)
+
+function openQuotaPicker(row: { id: string; notes?: string | null }): void {
+  quotaTarget.value = row
+  quotaPickVisible.value = true
+}
+
+/** 选中定额 → 写备注 → 收尾（定额人工费就是靠这个备注触发的 ✓） */
+async function onQuotaPicked(q: { code: string; name?: string }): Promise<void> {
+  const row = quotaTarget.value
+  if (!row) return
+  const parentId = (row as { parent_item_id?: string | null }).parent_item_id
+  // 定额模式 + 点的是**主设备行** → 建一条定额子目行 ✓（广联达式 ✓）
+  //   子目的钱走**既有** install_unit_price（= 定额基价 ✓）→ 后端零改动 ✓
+  if (installMode.value === 'quota' && !parentId) {
+    const base = Number((q as { base_price?: string | number }).base_price ?? 0)
+    const parent = visibleTree.value.find((r) => String(r.id) === String(row.id)) as
+      | { quantity?: unknown }
+      | undefined
+    const qty = Number(parent?.quantity ?? 1)
+    await quoteApi.addItem(quoteId.value, {
+      name: q.name ? `${q.code} ${q.name}` : q.code,
+      unit: (q as { unit?: string }).unit || '项',
+      quantity: qty,
+      unit_price: 0,
+      install_unit_price: base,
+      notes: `quota:${q.code}`,
+      parent_item_id: String(row.id),
+    } as never)
+    ElMessage.success(`已加定额子目 ${q.code}（工程量默认 ${qty} ✓ 可单独改 ✓）`)
+  } else {
+    await quoteApi.updateItem(quoteId.value, row.id, installMode.value === 'quota'
+      ? { notes: withQuota(row.notes, q.code),
+          install_unit_price: Number((q as { base_price?: string | number }).base_price ?? 0) }
+      : { notes: withQuota(row.notes, q.code) })
+    ElMessage.success(`已套定额 ${q.code}${q.name ? '（' + q.name + '）' : ''} ✓`)
+  }
+  await saveAndCompute()
+}
+
+/** 安装单价就地改（用户 ②：以前只能在编辑弹窗改 ✗） */
+async function onInstallPriceChange(row: { id: string }, v: number | undefined): Promise<void> {
+  await quoteApi.updateItem(quoteId.value, row.id, { install_unit_price: v ?? 0 })
+      await reload()
+}
+
+// ==================== 安装单价方式（2026-10-05 用户设计）====================
+//   manual：手动填安装单价（不显示定额列 ✓）
+//   quota ：套定额模式（套定额后**基价自动填进安装单价** ✓，且不再叠加定额人工费 ✓）
+const installMode = ref<string>('manual')
+
+// 切换模式期间的标志（2026-10-05）：
+//   页面里有多处会触发 reload ✓ —— 若一个"早于 PATCH 发出"的 reload 后回来，
+//   它会把 installMode 按**旧数据**重新赋值 ✗ → 表现为"切了又弹回去、不流畅" ✓。
+//   所以切换期间不许 reload 覆盖它 ✗。
+let modeSaving = false
+
+async function onModeChange(v: string): Promise<void> {
+  const prev = installMode.value
+  installMode.value = v          // ① 先就地切：界面立刻响应，不等网络 ✓
+  modeSaving = true
+  try {
+    await quoteApi.update(quoteId.value, { install_mode: v } as never)
+    ElMessage.success(v === 'quota' ? '已切到「套定额」模式 ✓' : '已切到「手动填」模式 ✓')
+  } catch (e) {
+    installMode.value = prev     // ② 失败回滚 ✓
+    ElMessage.error(extractErrorMessage(e))
+  } finally {
+    modeSaving = false
+    await reload()               // ③ 保存成功后才同步一次（此时拿到的一定是新值 ✓）
+  }
+}
+
+// ==================== 广联达式树形明细（2026-10-05 阶段1）====================
+// 主设备行 = 有设备费的普通行 ✓；定额子目行 = parent_item_id 指向主设备 ✓
+//   · 子目的 money 走**既有** install_unit_price（= 定额基价）✓ → 后端零改动 ✓
+//   · 子目的 quantity = 工程量（默认跟随主设备 ✓，可单独改 ✓）
+const visibleTree = computed<any[]>(() => {
+  const rows = visibleItems.value as unknown as Array<Record<string, unknown>>
+  const byParent = new Map<string, Array<Record<string, unknown>>>()
+  for (const r of rows) {
+    const pid = r.parent_item_id ? String(r.parent_item_id) : ''
+    if (pid) {
+      const arr = byParent.get(pid) ?? []
+      arr.push(r)
+      byParent.set(pid, arr)
+    }
+  }
+  return rows
+    .filter((r) => !r.parent_item_id)                 // 顶层只留主设备 ✓
+    .map((r) => ({ ...r, children: byParent.get(String(r.id)) ?? [] }))
+})
+
+/** 是不是定额子目行 ✓ */
+function isQuotaChild(row: { parent_item_id?: string | null }): boolean {
+  return Boolean(row?.parent_item_id)
+}
+
+// ==================== AI 预套定额（2026-10-05 搬到主界面）====================
+//  规则先匹配（产品分类 + 名称）✓ → AI 只在候选里挑 ✓ → **人工确认后**才落库 ✓
+//  约定：定额模式 + 主设备行 → 建定额子目行 ✓；手动模式 → 写备注 quota:编号 ✓
+const aiSuggesting = ref(false)
+const aiSuggest = ref<Record<string, any>>({})    // item_id → 建议
+const aiPicked = ref<Record<string, string>>({})  // item_id → 选中的编号
+const aiSelected = ref<string[]>([])              // 勾选的行（批量确认用）
+
+const aiPickedCount = computed(
+  () => aiSelected.value.filter((id) => aiPicked.value[id]).length,
+)
+
+async function runAiSuggest(): Promise<void> {
+  aiSuggesting.value = true
+  try {
+    const { data } = await http.post(`/quotes/${quoteId.value}/quota-suggest`)
+    const rows = ((data as { items?: unknown[] })?.items ?? []) as Array<Record<string, any>>
+    const map: Record<string, any> = {}
+    const sel: Record<string, string> = {}
+    for (const r of rows) {
+      const id = String(r.item_id)
+      map[id] = r
+      const code = r.ai_code || r.suggestions?.[0]?.code || ''
+      if (code) sel[id] = code
+    }
+    aiSuggest.value = map
+    aiPicked.value = sel
+    aiSelected.value = rows.map((r) => String(r.item_id))
+    ElMessage.success(
+      `已给出 ${rows.length} 行建议（默认全勾选）—— 可逐行确认，或点「批量直接确认」✓`,
+    )
+  } catch (e) {
+    ElMessage.error(extractErrorMessage(e))
+  } finally {
+    aiSuggesting.value = false
+  }
+}
+
+/** 把一行建议落库 ✓（定额模式建子目 ✓ / 手动模式写备注 ✓） */
+async function applySuggestion(itemId: string): Promise<boolean> {
+  const code = aiPicked.value[itemId]
+  if (!code) return false
+  const row = visibleItems.value.find((r) => String(r.id) === String(itemId)) as
+    | { id: string; quantity?: unknown; notes?: string | null; parent_item_id?: string | null }
+    | undefined
+  if (!row) return false
+  const cand = ((aiSuggest.value[itemId]?.suggestions ?? []) as Array<Record<string, any>>)
+    .find((c) => String(c.code) === code)
+  if (installMode.value === 'quota' && !row.parent_item_id) {
+    await quoteApi.addItem(quoteId.value, {
+      name: cand?.name ? `${code} ${cand.name}` : code,
+      unit: String(cand?.unit ?? '项'),
+      quantity: Number(row.quantity ?? 1),
+      unit_price: 0,
+      install_unit_price: Number(cand?.base_price ?? 0),
+      notes: `quota:${code}`,
+      parent_item_id: String(row.id),
+    } as never)
+  } else {
+    await quoteApi.updateItem(quoteId.value, row.id, {
+      notes: withQuota(row.notes, code),
+      ...(installMode.value === 'quota'
+        ? { install_unit_price: Number(cand?.base_price ?? 0) }
+        : {}),
+    })
+  }
+  return true
+}
+
+async function confirmOne(itemId: string): Promise<void> {
+  if (await applySuggestion(itemId)) {
+    const next = { ...aiSuggest.value }
+    delete next[itemId]
+    aiSuggest.value = next
+    ElMessage.success('已确认该行定额 ✓')
+    await saveAndCompute()
+  }
+}
+
+async function confirmBatch(): Promise<void> {
+  let n = 0
+  for (const id of [...aiSelected.value]) {
+    if (await applySuggestion(id)) n += 1
+  }
+  aiSuggest.value = {}
+  aiPicked.value = {}
+  aiSelected.value = []
+  ElMessage.success(`批量直接确认 ${n} 行 ✓`)
+  await saveAndCompute()
+}
+
+</script>
+
+<template>
+  <div v-loading="loading" class="page wb">
+    <!-- ② 项目信息条 -->
+    <div class="card wb-info">
+      <div class="wi-left">
+        <div class="wi-title">{{ project?.name ?? '—' }}</div>
+        <div class="wi-sub">{{ project?.address || project?.customer_name || '—' }}</div>
+      </div>
+      <div class="wi-grid">
+        <div><span class="k">客户名称</span><span class="v">{{ project?.customer_name || '—' }}</span></div>
+        <div><span class="k">联系人</span><span class="v">{{ project?.customer_contact || '—' }} {{ project?.customer_phone || '' }}</span></div>
+        <div><span class="k">报价方式</span><span class="v">{{ feeBaseLabel }}</span></div>
+        <div><span class="k">计税方式</span><span class="v">{{ rates.tax_rate_pct }}%</span></div>
+        <div><span class="k">编制人 / 日期</span><span class="v">{{ auth.displayName }} · {{ quote?.created_at ? dateTime(quote?.created_at).slice(0, 10) : '—' }}</span></div>
+        <div class="wi-no">
+          <span class="k">报价单号</span>
+          <span class="v mono">{{ quote?.code }}</span>
+          <el-tag size="small" effect="plain" :type="locked ? 'success' : 'info'">
+            {{ meta.label('quote_status', quote?.status) }}
+          </el-tag>
+        </div>
+      </div>
+      <div class="wi-actions no-print">
+        <!-- 状态机：原型没有，但审批链是新需求，保留 -->
+        <el-dropdown v-if="canSubmit || canStartReview || (canApprove && locked)" @command="onStatusCommand">
+          <el-button size="small" :loading="statusChanging">
+            状态操作<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+          </el-button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item v-if="canSubmit" command="submitted">
+                {{ quoteStatus === 'rejected' ? '重新提交' : '提交审核' }}
+              </el-dropdown-item>
+              <el-dropdown-item v-if="canStartReview" command="reviewing">开始审核（接手）</el-dropdown-item>
+              <el-dropdown-item v-if="canApprove && locked" command="draft">退回草稿（解除锁定）</el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
+        <el-button
+          v-if="canDecide"
+          size="small"
+          type="success"
+          :loading="statusChanging"
+          @click="changeStatus('approved', '批准', '批准后内容将被锁定，如需修改必须先退回草稿。确认批准？')"
+        >
+          批准
+        </el-button>
+        <el-button
+          v-if="canDecide"
+          size="small"
+          type="danger"
+          plain
+          :loading="statusChanging"
+          @click="changeStatus('rejected', '驳回', '驳回后需要修改并重新提交，确认驳回？')"
+        >
+          驳回
+        </el-button>
+        <el-button v-if="canSeeAudit" size="small" link @click="openAudit">
+          <el-icon><Clock /></el-icon>&nbsp;操作记录
+        </el-button>
+        <el-button @click="openRevisions">
+          <el-icon><Clock /></el-icon>&nbsp;版本历史
+        </el-button>
+        <el-button size="small" link class="no-print" @click="router.push({ name: 'projects' })">
+          <el-icon><ArrowLeft /></el-icon>&nbsp;返回项目
+        </el-button>
+      </div>
+    </div>
+
+    <!-- 停产提醒（保留既有功能；打印不要） -->
+    <el-alert
+      v-if="discontinuedCount > 0"
+      class="mb no-print"
+      type="error"
+      show-icon
+      :closable="false"
+      :title="`明细里有 ${discontinuedCount} 行是已停产/退市型号 —— 出货前需要换型`"
+    />
+
+    <!-- ③ 工具栏 -->
+    <div class="card wb-toolbar no-print">
+      <el-button :disabled="!canEdit" @click="goSubsystems">
+        <el-icon><Plus /></el-icon>&nbsp;新增子系统
+      </el-button>
+      <el-button type="primary" :disabled="!canEdit" @click="pickerVisible = true">
+        <el-icon><Box /></el-icon>&nbsp;从设备库添加
+      </el-button>
+      <el-button :disabled="!canEdit" @click="openItemDialog(null)">手工新增行</el-button>
+      <el-button :disabled="!canEdit" @click="inquiryVisible = true">
+        <el-icon><Upload /></el-icon>&nbsp;导入甲方清单
+      </el-button>
+      <el-button :disabled="!canEdit" @click="applyTemplateVisible = true">
+        <el-icon><Grid /></el-icon>&nbsp;套用点位模板
+      </el-button>
+      <el-button :disabled="!canEdit" @click="applyTemplateVisible = true">批量添加点位</el-button>
+      <el-button disabled title="原型已设计，后端未实现">批量调价</el-button>
+      <el-button :disabled="!canEdit || !selected.length" @click="removeSelected">
+        删除行{{ selected.length ? `（${selected.length}）` : '' }}
+      </el-button>
+      <el-button
+        :disabled="!selected.length || !auth.can('device_library', 'create')"
+        :title="selected.length ? `把勾选的 ${selected.length} 行收进企业设备库（手工录入的行才有意义）` : '先在明细里勾选行'"
+        @click="promoteToLibrary"
+      >
+        复制到设备库{{ selected.length ? `（${selected.length}）` : '' }}
+      </el-button>
+
+      <div class="spacer" />
+      <span class="text-muted toolbar-stat">
+        共 {{ stats.subsystems }} 个子系统 · {{ stats.items }} 项设备 · {{ stats.points }} 个点位
+      </span>
+          <el-button type="primary" :loading="aiSuggesting" @click="runAiSuggest">
+            <el-icon><MagicStick /></el-icon>&nbsp;AI 预套定额
+          </el-button>
+          <el-button v-if="aiPickedCount" @click="confirmBatch">
+            批量直接确认（{{ aiPickedCount }}）
+          </el-button>
+      <el-select
+        v-model="installMode"
+        size="small"
+        style="width: 190px"
+        @change="onModeChange"
+      >
+        <el-option label="手动填安装单价" value="manual" />
+        <!-- 定额模式（2026-10-05 复核后重新开放 ✓）：
+             实测**不存在重复计** ✓ —— 之前看到的「定额人工费」是未回填保护的**镜像显示** ✗，
+             已在后端定额模式下关掉该镜像 ✓ -->
+          <el-option label="套定额（基价自动填进安装单价）" value="quota" />
+      </el-select>
+      <el-button class="no-print" @click="onPrint">
+        <el-icon><Printer /></el-icon>&nbsp;打印
+      </el-button>
+    </div>
+
+    <!-- ④ 两栏 + ⑤ 左栏下半 -->
+    <div class="wb-body">
+      <aside class="card wb-left">
+        <div class="wl-head">
+          <span>子系统</span>
+          <span>小计（元）</span>
+        </div>
+        <div
+          class="wl-row"
+          :class="{ active: currentSubsystemId === null }"
+          @click="selectSubsystem(null)"
+        >
+          <span>全部</span>
+          <span class="num">{{ money(summary?.grand_total ?? quote?.total_with_tax) }}</span>
+        </div>
+        <div
+          v-for="r in subsystemRows"
+          :key="r.id"
+          class="wl-row"
+          :class="{ active: currentSubsystemId === r.id }"
+          @click="selectSubsystem(r.id)"
+        >
+          <span class="wl-name">{{ r.name }}</span>
+          <span class="num">{{ money(r.amount) }}</span>
+        </div>
+        <el-empty v-if="!subsystemRows.length" description="还没有子系统" :image-size="50" />
+
+        <!-- ⑤ 项目合计 + 对内视图 -->
+        <el-divider class="wl-div" content-position="left">项目合计</el-divider>
+        <div class="wl-kv"><span>设备费</span><span class="num">{{ money(quote?.equipment_total) }}</span></div>
+        <div class="wl-kv"><span>安装调试费</span><span class="num">{{ money(quote?.install_total) }}</span></div>
+        <div class="wl-kv"><span>辅材费</span><span class="num">{{ money(quote?.auxiliary_total) }}</span></div>
+        <div class="wl-kv"><span>点位总数</span><span class="num">{{ stats.points }} 点</span></div>
+        <div class="wl-total">
+          <div class="wl-total-label">报价合计（含税）</div>
+          <div class="wl-total-value">¥ {{ money(quote?.total_with_tax) }}</div>
+          <div class="wl-total-sub">
+            不含税 {{ money(quote?.subtotal_before_tax) }} · 税额 {{ money(quote?.tax_amount) }}
+          </div>
+        </div>
+        <template v-if="cost">
+          <el-divider class="wl-div" content-position="left">成本与毛利（对内视图）</el-divider>
+          <div class="wl-kv"><span>成本</span><span class="num">{{ money(cost.cost_total) }}</span></div>
+          <div class="wl-kv">
+            <span>毛利 · {{ (toNum(cost.gross_profit_rate) * 100).toFixed(2) }}%</span>
+            <span class="num ok-text">{{ money(cost.gross_profit) }}</span>
+          </div>
+        </template>
+      </aside>
+
+      <section class="card wb-right">
+        <div class="wr-head">
+          <span class="wr-title">
+            设备库：企业库 {{ deviceTotal }} 条
+          </span>
+          <el-tag v-if="currentSubsystemId" size="small" type="info" effect="plain">
+            {{ subsystemName.get(currentSubsystemId) }}
+          </el-tag>
+          <div class="spacer" />
+          <el-input
+            v-model="itemKeyword"
+            size="small"
+            placeholder="搜索名称 / 品牌 / 型号"
+            clearable
+            style="width: 220px"
+          >
+            <template #prefix><el-icon><Search /></el-icon></template>
+          </el-input>
+          <el-button size="small" disabled title="原型已设计，后端未实现">套用点位模板</el-button>
+          <el-button size="small" type="primary" :disabled="!canEdit" @click="pickerVisible = true">
+            + 添加设备
+          </el-button>
+        </div>
+
+        <!-- 原型 ④ 右栏的快捷 chips：直接切子系统筛选 -->
+        <div class="wr-chips no-print">
+          <button
+            class="chip"
+            :class="{ active: currentSubsystemId === null }"
+            @click="selectSubsystem(null)"
+          >
+            全部
+          </button>
+          <button
+            v-for="r in quickChips"
+            :key="r.id"
+            class="chip"
+            :class="{ active: currentSubsystemId === r.id }"
+            @click="selectSubsystem(r.id)"
+          >
+            {{ r.name }}
+          </button>
+        </div>
+
+        <el-table
+          :data="visibleTree"
+          border
+          stripe
+          size="small"
+          row-key="id"
+          :tree-props="{ children: 'children' }"
+          default-expand-all
+          @selection-change="onSelectionChange"
+        >
+          <el-table-column type="selection" width="38" />
+          <el-table-column label="序号" type="index" width="52" />
+          <el-table-column label="设备 / 材料名称" min-width="180">
+            <template #default="{ row }">
+              <div>{{ row.name }}</div>
+              <div class="row-tags">
+                <el-tag v-if="row.device_status && meta.isDiscontinued(row.device_status)" size="small" type="danger" effect="plain">
+                  已停产
+                </el-tag>
+                <el-tag v-else-if="row.device_status === 'near_eol'" size="small" type="warning" effect="plain">
+                  临近停产
+                </el-tag>
+                <el-tag v-if="row.is_owner_supplied" size="small" type="info" effect="plain">甲供</el-tag>
+                <el-tag v-if="row.source === 'library'" size="small" effect="plain">库</el-tag>
+                <span v-else-if="row.source === 'imported'" class="text-muted">导入</span>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column label="品牌" width="110">
+            <template #default="{ row }">{{ row.brand || '—' }}</template>
+          </el-table-column>
+          <el-table-column label="型号规格" min-width="150">
+            <template #default="{ row }">
+              <div>{{ row.model || '—' }}</div>
+            </template>
+          </el-table-column>
+          <el-table-column label="单位" width="60" prop="unit" />
+          <el-table-column label="数量" width="104">
+            <template #default="{ row }">
+              <el-input-number
+                :model-value="toNum(row.quantity)"
+                :min="0"
+                :precision="2"
+                :controls="false"
+                size="small"
+                :disabled="!canEdit"
+                style="width: 100%"
+                @change="(v: number | undefined) => onQuantityChange(row, v)"
+              />
+            </template>
+          </el-table-column>
+          <el-table-column label="设备单价" width="106" align="right">
+            <template #default="{ row }"><span class="num">{{ money(row.unit_price) }}</span></template>
+          </el-table-column>
+          <!-- 安装单价：**就地可编辑**（2026-10-05 用户要求）——
+               以前只有点开编辑弹窗才能改 ✗；设备库也不再维护这个值 ✓ -->
+          <el-table-column label="安装单价" width="128" align="right">
+            <template #default="{ row }">
+              <el-input-number
+                :model-value="toNum(row.install_unit_price)"
+                :disabled="installMode === 'quota' && !isQuotaChild(row)"
+                :min="0"
+                :precision="2"
+                :controls="false"
+                size="small"
+                style="width: 100%"
+                @change="(v: number | undefined) => onInstallPriceChange(row, v)"
+              />
+            </template>
+          </el-table-column>
+          <!-- 定额：显示本行套的定额编号（备注里的 quota:xxx ✓），点击可换 ✓ -->
+          <!-- AI 预套建议（2026-10-05 搬到主界面 ✓）：可改下拉 + 逐行确认 ✓ -->
+          <el-table-column v-if="Object.keys(aiSuggest).length" label="AI 建议" min-width="220">
+            <template #default="{ row }">
+              <el-select
+                v-if="aiSuggest[String(row.id)]"
+                v-model="aiPicked[String(row.id)]"
+                size="small"
+                clearable
+                style="width: 100%"
+              >
+                <el-option
+                  v-for="c in aiSuggest[String(row.id)].suggestions"
+                  :key="c.code"
+                  :label="`${c.code} ${c.name}`"
+                  :value="c.code"
+                />
+              </el-select>
+              <span v-else class="text-muted">—</span>
+            </template>
+          </el-table-column>
+          <el-table-column v-if="Object.keys(aiSuggest).length" label="确认" width="92" align="center">
+            <template #default="{ row }">
+              <el-button
+                v-if="aiSuggest[String(row.id)]"
+                link
+                type="primary"
+                @click.stop="confirmOne(String(row.id))"
+              >
+                确认
+              </el-button>
+            </template>
+          </el-table-column>
+          <el-table-column v-if="installMode === 'quota'" label="定额" width="132" align="center">
+            <template #default="{ row }">
+              <el-button
+                v-if="installMode === 'quota' && !isQuotaChild(row)"
+                link
+                type="primary"
+                @click.stop="openQuotaPicker(row)"
+              >
+                ＋定额
+              </el-button>
+              <el-button link type="primary" @click.stop="openQuotaPicker(row)">
+                <template v-if="quotaOf(row)">
+                  {{ quotaOf(row) }}
+                  <span v-if="quotaInfo[quotaOf(row)]" class="text-muted">
+                    · 基价 {{ quotaInfo[quotaOf(row)].base_price }}
+                  </span>
+                </template>
+                <template v-else>未套定额</template>
+              </el-button>
+            </template>
+          </el-table-column>
+          <!-- 辅材「按工程量」口径才需要这一列（2026-10-04）：
+               辅材费 = Σ(数量 × 单位辅材费)，所以必须让用户能填这个单价 -->
+          <el-table-column
+            v-if="rates.auxiliary_base === 'by_quantity'"
+            label="辅材单价"
+            width="112"
+            align="right"
+          >
+            <template #default="{ row }">
+              <el-input-number
+                :model-value="toNum(row.auxiliary_unit_price)"
+                :min="0"
+                :precision="4"
+                :controls="false"
+                size="small"
+                :disabled="!canEdit"
+                style="width: 100%"
+                @change="(v: number | undefined) => onAuxUnitChange(row, v)"
+              />
+            </template>
+          </el-table-column>
+          <el-table-column label="安装费" width="106" align="right">
+            <template #default="{ row }"><span class="num">{{ money(row.install_amount) }}</span></template>
+          </el-table-column>
+          <el-table-column label="小计" width="118" align="right">
+            <template #default="{ row }">
+              <span class="num strong">{{ money(toNum(row.equipment_amount) + toNum(row.install_amount)) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="104" fixed="right" class-name="col-no-print" label-class-name="col-no-print">
+            <template #default="{ row }">
+              <el-button link size="small" :disabled="!canEdit" @click="openItemDialog(row)">编辑</el-button>
+              <el-button link size="small" type="danger" :disabled="!canEdit" @click="removeRow(row)">删</el-button>
+            </template>
+          </el-table-column>
+          <template #empty>
+            <el-empty description="这个子系统还没有明细，点「从设备库添加」开始" :image-size="70" />
+          </template>
+        </el-table>
+
+        <div class="wr-foot">
+          <span v-if="currentSubsystemId">
+            本系统小计 <b class="num">{{ money(currentEquipment) }}</b>
+          </span>
+          <span v-else>
+            全部小计 <b class="num">{{ money(summary?.grand_total ?? quote?.subtotal_before_tax) }}</b>
+          </span>
+          <span class="text-muted">
+            安装费按「安装单价 × 数量 × 工艺系数」计；甲供行只计安装费。
+          </span>
+        </div>
+      </section>
+    </div>
+
+    <!-- ⑥ 费用汇总（常驻底部；原型把费率摊在这里） -->
+    <div class="card wb-fees">
+      <div class="fee">
+        <div class="fee-label">设备费</div>
+        <div class="fee-value num">{{ money(quote?.equipment_total) }}</div>
+      </div>
+      <div class="fee">
+        <div class="fee-label">安装调试费</div>
+        <div class="fee-value num">{{ money(quote?.install_total) }}</div>
+      </div>
+      <div class="fee">
+        <div class="fee-label">
+          辅材费 ·
+          <el-input-number
+            v-model="rates.auxiliary_rate_pct"
+            :min="0" :max="100" :precision="2" :controls="false" size="small"
+            class="fee-input" :disabled="!canEdit" @change="onRateChange"
+          />%
+        </div>
+        <div class="fee-value num">{{ money(quote?.auxiliary_total) }}</div>
+      </div>
+      <div class="fee">
+        <div class="fee-label">
+          设计费 ·
+          <el-input-number
+            v-model="rates.design_rate_pct"
+            :min="0" :max="100" :precision="2" :controls="false" size="small"
+            class="fee-input" :disabled="!canEdit" @change="onRateChange"
+          />%
+        </div>
+        <div class="fee-value num">{{ money(quote?.design_fee) }}</div>
+      </div>
+      <div class="fee">
+        <div class="fee-label">
+          维保费 ·
+          <el-input-number
+            v-model="rates.warranty_rate_pct"
+            :min="0" :max="100" :precision="2" :controls="false" size="small"
+            class="fee-input" :disabled="!canEdit" @change="onRateChange"
+          />%
+        </div>
+        <div class="fee-value num">{{ money(quote?.warranty_fee) }}</div>
+      </div>
+      <div class="fee">
+        <div class="fee-label">
+          培训费 ·
+          <el-input-number
+            v-model="rates.training_fee"
+            :min="0" :precision="2" :controls="false" size="small"
+            class="fee-input fee-input-wide" :disabled="!canEdit" @change="onRateChange"
+          />元
+        </div>
+        <div class="fee-value num">{{ money(quote?.training_fee) }}</div>
+      </div>
+      <div class="fee">
+        <div class="fee-label">
+          管理费及利润 ·
+          <el-input-number
+            v-model="rates.mgmt_profit_rate_pct"
+            :min="0" :max="100" :precision="2" :controls="false" size="small"
+            class="fee-input" :disabled="!canEdit" @change="onRateChange"
+          />%
+        </div>
+        <div class="fee-value num">{{ money(quote?.mgmt_profit) }}</div>
+      </div>
+      <div class="fee">
+        <div class="fee-label">
+          税金 ·
+          <el-input-number
+            v-model="rates.tax_rate_pct"
+            :min="0" :max="100" :precision="2" :controls="false" size="small"
+            class="fee-input" :disabled="!canEdit" @change="onRateChange"
+          />%
+        </div>
+        <div class="fee-value num">{{ money(quote?.tax_amount) }}</div>
+      </div>
+      <div class="fee fee-grand">
+        <div class="fee-label">报价合计（含税）</div>
+        <div class="fee-value num grand">¥ {{ money(quote?.total_with_tax) }}</div>
+      </div>
+
+      <div class="fee-actions no-print">
+        <el-button link type="primary" @click="goPreview">
+          <el-icon><Document /></el-icon>&nbsp;客户版预览
+        </el-button>
+        <el-button link type="primary" @click="goLaborSetting">
+          <el-icon><Coin /></el-icon>&nbsp;人工费设置
+        </el-button>
+        <el-button
+          v-if="canEdit"
+          type="primary"
+          :loading="computing"
+          :disabled="!ratesDirty"
+          @click="saveAndCompute"
+        >
+          保存并重算{{ ratesDirty ? ' *' : '' }}
+        </el-button>
+        <el-dropdown v-if="canExport" @command="(c: string) => onExport(c.split(':')[0] as 'xlsx' | 'pdf', c.endsWith('internal'))">
+          <el-button :loading="exporting">
+            导出<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+          </el-button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item command="xlsx:customer">客户版 Excel</el-dropdown-item>
+              <el-dropdown-item command="pdf:customer">客户版 PDF</el-dropdown-item>
+              <el-dropdown-item v-if="auth.canSeeCost" divided command="xlsx:internal">
+                内部版 Excel（含成本）
+              </el-dropdown-item>
+              <el-dropdown-item v-if="auth.canSeeCost" command="pdf:internal">
+                内部版 PDF（含成本）
+              </el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
+      </div>
+    </div>
+
+    <div class="wb-foot-hint text-muted">
+      辅材费 = 基数 × {{ rates.auxiliary_rate_pct }}% ｜ 设计费 = 基数 × {{ rates.design_rate_pct }}% ｜
+      维保费 = 设备费 × {{ rates.warranty_rate_pct }}% ｜ 管理费及利润 = 小计 × {{ rates.mgmt_profit_rate_pct }}% ｜
+      税金 = 税前 × {{ rates.tax_rate_pct }}%~ ｜
+      {{ auth.canSeeCost ? '成本口径 = 设备采购价 + 施工人工 + 辅材（仅主管与财务可见）' : '当前账号看不到成本视图' }}
+      <span v-if="quote?.updated_at"> · 已自动保存 {{ dateTime(quote?.updated_at) }}</span>
+    </div>
+
+    <el-alert
+      v-for="(w, i) in warnings"
+      :key="i"
+      class="mb"
+      type="warning"
+      show-icon
+      :closable="false"
+      :title="w"
+    />
+
+    <!-- 弹窗 -->
+    <AddDeviceDialog
+      v-model="pickerVisible"
+      :subsystems="subsystemOptions"
+      :default-subsystem-id="currentSubsystemId"
+      @pick="onPick"
+      @manual="onManualAdd"
+    />
+    <ApplyPointTemplateDialog
+      v-model="applyTemplateVisible"
+      :quote-id="quoteId"
+      :subsystems="subsystemOptions"
+      :default-subsystem-id="currentSubsystemId"
+      @applied="reload"
+    />
+    <InquiryImportDialog
+      v-model="inquiryVisible"
+      :quote-id="quoteId"
+      :subsystems="subsystemOptions"
+      @done="reload"
+    />
+    <QuoteItemDialog
+      v-model="itemDialogVisible"
+      :quote-id="quoteId"
+      :item="editingItem"
+      :subsystems="subsystemOptions"
+      :readonly="!canEdit"
+      @saved="reload"
+    />
+    <el-drawer v-model="auditVisible" title="操作记录" size="520px">
+      <el-table :data="auditLogs" size="small" border>
+        <el-table-column label="时间" width="150">
+          <template #default="{ row }">{{ dateTime(row.created_at) }}</template>
+        </el-table-column>
+        <el-table-column label="动作" width="90">
+          <template #default="{ row }">
+            <el-tag size="small" effect="plain">{{ row.action }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="来源" width="150">
+          <template #default="{ row }">
+            <div class="mono">{{ row.ip || '—' }}</div>
+            <div class="text-muted mono audit-ua">{{ row.user_agent || '' }}</div>
+          </template>
+        </el-table-column>
+        <el-table-column label="内容" min-width="200">
+          <template #default="{ row }">
+            <span class="mono">{{ JSON.stringify(row.payload) }}</span>
+          </template>
+        </el-table-column>
+      </el-table>
+    </el-drawer>
+  </div>
+    <!-- 版本历史与对比（2026-10-04）：提交/批准各落一版，可比"这版和上版差在哪" -->
+    <el-drawer v-model="revDrawer" title="版本历史" size="70%">
+      <el-form inline class="mb" @submit.prevent>
+        <el-form-item>
+          <el-button type="primary" plain :disabled="!canEdit" @click="saveRevisionNow">
+            <el-icon><Plus /></el-icon>&nbsp;保存当前版本
+          </el-button>
+        </el-form-item>
+        <el-form-item label="对比">
+          <el-select v-model="revFrom" style="width: 130px" placeholder="旧版">
+            <el-option
+              v-for="r in revisions"
+              :key="`f-${r.seq}`"
+              :value="r.seq"
+              :label="`第 ${r.seq} 版 · ${REASON_LABEL[r.reason] ?? r.reason}`"
+            />
+          </el-select>
+          <span style="margin: 0 6px">→</span>
+          <el-select v-model="revTo" style="width: 130px" placeholder="新版">
+            <el-option
+              v-for="r in revisions"
+              :key="`t-${r.seq}`"
+              :value="r.seq"
+              :label="`第 ${r.seq} 版 · ${REASON_LABEL[r.reason] ?? r.reason}`"
+            />
+          </el-select>
+          <el-button type="primary" style="margin-left: 8px" @click="runDiff">对比</el-button>
+        </el-form-item>
+      </el-form>
+
+      <el-table v-loading="revLoading" :data="revisions" border size="small" max-height="240">
+        <el-table-column prop="seq" label="版本" width="70">
+          <template #default="{ row }">第 {{ row.seq }} 版</template>
+        </el-table-column>
+        <el-table-column label="来源" width="100">
+          <template #default="{ row }">
+            <el-tag size="small" effect="plain">
+              {{ REASON_LABEL[row.reason] ?? row.reason }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="status" label="状态" width="90" />
+        <el-table-column prop="item_count" label="行数" width="70" />
+        <el-table-column label="含税合计" width="130" align="right">
+          <template #default="{ row }">
+            <span class="num">{{ money(row.totals?.total_with_tax) }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="note" label="备注" min-width="140" show-overflow-tooltip />
+        <el-table-column prop="created_by_name" label="操作人" width="100" />
+        <el-table-column label="时间" width="150">
+          <template #default="{ row }">{{ row.created_at ? dateTime(row.created_at) : '—' }}</template>
+        </el-table-column>
+        <template #empty>
+          <el-empty description="还没有版本快照（提交或批准时会自动保存）" :image-size="60" />
+        </template>
+      </el-table>
+
+      <template v-if="revDiff">
+        <div class="card-title" style="margin-top: 14px">
+          第 {{ revDiff.from.seq }} 版 → 第 {{ revDiff.to.seq }} 版
+        </div>
+
+        <el-alert
+          v-if="!revDiff.has_changes && !revDiff.totals.length"
+          type="success"
+          :closable="false"
+          show-icon
+          title="两版内容完全一致"
+        />
+
+        <template v-if="revDiff.totals.length">
+          <div class="mb"><b>金额变化</b></div>
+          <el-table :data="revDiff.totals" border size="small">
+            <el-table-column prop="field" label="项目" width="180" />
+            <el-table-column label="旧" width="130" align="right">
+              <template #default="{ row }"><span class="num">{{ money(row.from) }}</span></template>
+            </el-table-column>
+            <el-table-column label="新" width="130" align="right">
+              <template #default="{ row }"><span class="num">{{ money(row.to) }}</span></template>
+            </el-table-column>
+            <el-table-column label="差" align="right">
+              <template #default="{ row }">
+                <span class="num" :class="Number(row.delta) >= 0 ? 'ok-text' : 'danger-text'">
+                  {{ Number(row.delta) >= 0 ? '+' : '' }}{{ money(row.delta) }}
+                </span>
+              </template>
+            </el-table-column>
+          </el-table>
+        </template>
+
+        <template v-if="revDiff.items_added.length || revDiff.items_removed.length">
+          <div class="mb" style="margin-top: 12px"><b>明细增删</b></div>
+          <el-table
+            :data="[
+              ...revDiff.items_added.map((x) => ({ ...x, kind: '新增' })),
+              ...revDiff.items_removed.map((x) => ({ ...x, kind: '删除' })),
+            ]"
+            border
+            size="small"
+          >
+            <el-table-column prop="kind" label="动作" width="80" />
+            <el-table-column prop="name" label="名称" min-width="180" />
+            <el-table-column prop="model" label="型号" min-width="140" />
+            <el-table-column prop="quantity" label="数量" width="90" align="right" />
+            <el-table-column label="单价" width="110" align="right">
+              <template #default="{ row }"><span class="num">{{ money(row.unit_price) }}</span></template>
+            </el-table-column>
+          </el-table>
+        </template>
+
+        <template v-if="revDiff.items_changed.length">
+          <div class="mb" style="margin-top: 12px"><b>明细改动</b></div>
+          <el-table :data="revDiff.items_changed" border size="small">
+            <el-table-column prop="name" label="名称" min-width="180" />
+            <el-table-column prop="model" label="型号" min-width="130" />
+            <el-table-column label="变化" min-width="260">
+              <template #default="{ row }">
+                <div v-for="f in row.fields" :key="f.field" class="mono">
+                  {{ f.field }}：{{ f.from }} → {{ f.to }}
+                </div>
+              </template>
+            </el-table-column>
+          </el-table>
+        </template>
+
+        <template v-if="revDiff.header.length">
+          
+      <!-- 报价说明条款（2026-10-05）：客户版 PDF 与预览印的就是这些 -->
+      <div class="card" style="margin-top: 12px">
+        <div class="card-title">
+          报价说明条款（客户版）
+          <span class="text-muted">
+            · 默认用「系统设置」里那份；也可以只给这一张单自定义
+          </span>
+        </div>
+
+        <el-radio-group v-model="useOwnClauses" class="mb">
+          <el-radio :value="false">用系统设置（所有单共用）</el-radio>
+          <el-radio :value="true">本单自定义</el-radio>
+        </el-radio-group>
+
+        <template v-if="useOwnClauses">
+          <el-form label-width="110px" class="mb">
+            <el-form-item label="本单有效期">
+              <el-input-number v-model="validDaysDraft" :min="1" :max="365" :precision="0" />
+              <span class="text-muted ml">天</span>
+            </el-form-item>
+          </el-form>
+
+          <div v-for="(_c, idx) in clausesDraft" :key="idx" class="st-clause">
+            <span class="st-no">{{ idx + 1 }}.</span>
+            <el-input v-model="clausesDraft[idx]" placeholder="条款文本，数字可用 {变量}" />
+            <el-button link :disabled="idx === 0" @click="moveClause(idx, -1)">↑</el-button>
+            <el-button link :disabled="idx === clausesDraft.length - 1"
+              @click="moveClause(idx, 1)">↓</el-button>
+            <el-button link type="danger" @click="clausesDraft.splice(idx, 1)">删</el-button>
+          </div>
+          <el-button size="small" @click="clausesDraft.push('')">+ 加一条</el-button>
+          <div class="text-muted" style="margin-top: 6px">
+            可用变量：
+            <code v-for="(label, name) in clausesData?.available_variables ?? {}" :key="name"
+              style="margin-right: 8px">{{ '{' + name + '}' }}={{ label }}</code>
+            —— 变量会在生成 PDF/预览时替换成本单实际数字
+          </div>
+        </template>
+
+        <div v-else-if="clausesData" class="text-muted">
+          当前生效：有效期 {{ clausesData.valid_days }} 天，
+          条款 {{ clausesData.clauses.length }} 条（在「系统设置 → 报价设置」里改）
+        </div>
+
+        <div v-if="clausesData" style="margin-top: 10px">
+          <b>客户版预览（替换变量后的样子）</b>
+          <ol class="clause-preview">
+            <li v-for="(c, i) in clausesData.clauses" :key="i">{{ c }}</li>
+          </ol>
+        </div>
+
+        <el-button type="primary" :loading="clausesSaving" @click="saveClauses">保存条款设置</el-button>
+        <el-button @click="useOwnClauses = false; saveClauses()">恢复用系统设置</el-button>
+        <div v-if="clausesData?.clauses_overridden || clausesData?.valid_days_overridden"
+          class="text-muted" style="margin-top: 6px">
+          本单已自定义（不影响其它报价单）
+        </div>
+      </div>
+
+<div class="mb" style="margin-top: 12px"><b>费率/口径改动</b></div>
+          <el-table :data="revDiff.header" border size="small">
+            <el-table-column prop="field" label="字段" width="200" />
+            <el-table-column prop="from" label="旧" />
+            <el-table-column prop="to" label="新" />
+          </el-table>
+        </template>
+      </template>
+    </el-drawer>
+
+    <!-- 分级审批（2026-10-04）：开启后"批准"要走完 N 级；这里显示进度与意见 -->
+    <el-card
+      v-if="approval && approval.enabled && canApprove"
+      class="card no-print"
+      shadow="never"
+    >
+      <div class="card-title">
+        审批链 · 已批 {{ approval.approved_levels }}/{{ approval.required_levels }} 级
+      </div>
+      <el-table :data="approval.records" size="small" border max-height="180">
+        <el-table-column prop="level" label="级" width="60" />
+        <el-table-column label="结果" width="90">
+          <template #default="{ row }">
+            <el-tag size="small" effect="plain" :type="row.decision === 'approved' ? 'success' : 'danger'">
+              {{ row.decision === 'approved' ? '通过' : '驳回' }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="comment" label="意见" min-width="200" show-overflow-tooltip />
+        <el-table-column prop="approver_name" label="审批人" width="110" />
+        <el-table-column label="时间" width="150">
+          <template #default="{ row }">{{ row.created_at ? dateTime(row.created_at) : '—' }}</template>
+        </el-table-column>
+        <template #empty>
+          <el-empty description="还没有审批记录" :image-size="50" />
+        </template>
+      </el-table>
+      <div class="mt">
+        <el-button type="success" @click="decide('approved')">
+          <el-icon><Select /></el-icon>&nbsp;通过本级
+        </el-button>
+        <el-button type="danger" plain @click="decide('rejected')">
+          <el-icon><CloseBold /></el-icon>&nbsp;驳回
+        </el-button>
+        <span class="text-muted" style="margin-left: 8px">
+          含税合计需 {{ approval.required_levels }} 级；批满后自动置为「已批准」
+        </span>
+      </div>
+    </el-card>
+
+
+    <!-- 定额选择器（2026-10-05）：点明细行的「定额」列打开 ✓ -->
+    <QuotaPickerDialog v-model="quotaPickVisible" @pick="onQuotaPicked" />
+  </template>
+
+<style scoped>
+.wb {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* ② 项目信息条 */
+.wb-info {
+  display: flex;
+  align-items: flex-start;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+
+.wi-left {
+  min-width: 240px;
+}
+
+.wi-title {
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.wi-sub {
+  color: var(--el-text-color-secondary);
+  font-size: 12.5px;
+  margin-top: 2px;
+}
+
+.wi-grid {
+  flex: 1 1 620px;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(140px, 1fr));
+  gap: 4px 18px;
+}
+
+.wi-grid .k {
+  display: block;
+  color: var(--el-text-color-secondary);
+  font-size: 11.5px;
+}
+
+.wi-grid .v {
+  display: inline-block;
+  font-size: 13px;
+}
+
+.wi-no .v {
+  margin-right: 6px;
+}
+
+.wi-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ③ 工具栏 */
+.wb-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+}
+
+.toolbar-stat {
+  font-size: 12.5px;
+  margin-right: 4px;
+}
+
+/* ④ 两栏 */
+.wb-body {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.wb-left {
+  width: 268px;
+  flex: 0 0 268px;
+  padding: 10px 12px;
+}
+
+.wl-head {
+  display: flex;
+  justify-content: space-between;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--el-border-color-lighter);
+}
+
+.wl-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.wl-row:hover {
+  background: var(--el-fill-color-light);
+}
+
+.wl-row.active {
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary);
+  font-weight: 600;
+}
+
+.wl-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wl-div {
+  margin: 10px 0 6px;
+}
+
+.wl-kv {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12.5px;
+  padding: 3px 0;
+}
+
+.wl-total {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--el-color-primary-light-9);
+}
+
+.wl-total-label {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+.wl-total-value {
+  font-size: 19px;
+  font-weight: 700;
+  color: var(--el-color-primary);
+}
+
+.wl-total-sub {
+  font-size: 11.5px;
+  color: var(--el-text-color-secondary);
+}
+
+/* ④ 右栏 */
+.wb-right {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 10px 12px;
+}
+
+.wr-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.wr-title {
+  font-weight: 600;
+  font-size: 13.5px;
+}
+
+.wr-foot {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--el-border-color-lighter);
+  font-size: 12.5px;
+}
+
+.wr-chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.chip {
+  padding: 3px 10px;
+  border: 1px solid var(--el-border-color);
+  border-radius: 12px;
+  background: #fff;
+  color: var(--el-text-color-regular);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.chip:hover {
+  border-color: var(--el-color-primary-light-5);
+  color: var(--el-color-primary);
+}
+
+.chip.active {
+  background: var(--el-color-primary-light-9);
+  border-color: var(--el-color-primary-light-5);
+  color: var(--el-color-primary);
+  font-weight: 600;
+}
+
+.row-tags {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  margin-top: 2px;
+}
+
+/* ⑥ 费用汇总 */
+.wb-fees {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+}
+
+.fee {
+  flex: 1 1 118px;
+  min-width: 118px;
+  padding: 0 10px;
+  border-right: 1px dashed var(--el-border-color-lighter);
+}
+
+.fee:last-of-type {
+  border-right: none;
+}
+
+.fee-label {
+  font-size: 11.5px;
+  color: var(--el-text-color-secondary);
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.fee-value {
+  font-size: 14.5px;
+  font-weight: 600;
+  margin-top: 3px;
+}
+
+.fee-input {
+  width: 54px;
+}
+
+.fee-input-wide {
+  width: 74px;
+}
+
+.fee-grand .fee-value.grand {
+  font-size: 18px;
+  color: var(--el-color-primary);
+}
+
+.fee-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  padding-left: 12px;
+}
+
+.audit-ua {
+  font-size: 10.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 150px;
+}
+
+.wb-foot-hint {
+  font-size: 11.5px;
+  line-height: 1.7;
+  padding: 0 2px 6px;
+}
+
+.clause-preview {
+  margin: 6px 0 10px 18px;
+  color: #555;
+  font-size: 13px;
+  line-height: 1.7;
+}
+.st-clause {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 6px;
+}
+.st-no {
+  color: #909399;
+  min-width: 18px;
+}
+</style>
+
+
+
+
+
+
+
+
+

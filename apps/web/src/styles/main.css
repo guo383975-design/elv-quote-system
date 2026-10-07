@@ -1,0 +1,206 @@
+/* 全局样式：配色沿用界面原型的 navy / primary / accent 体系 */
+
+:root {
+  --c-navy: #14243d;
+  --c-navy-soft: #1e3355;
+  --c-primary: #1668dc;
+  --c-accent: #d97706; /* 手工录入 / 待询价 */
+  --c-accent-bg: #fff7ed;
+  --c-accent-border: #fde3c8;
+  --c-accent-text: #b45309;
+  --c-green: #16a34a;
+  --c-total: #c2410c;
+  --c-muted: #8a94a6;
+  --c-border: #dcdfe6;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* ---------- 页面骨架 ---------- */
+
+.page {
+  padding: 16px 20px 32px;
+}
+
+.page-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+
+.page-title {
+  margin: 0;
+  font-size: 19px;
+  font-weight: 700;
+  color: var(--c-navy);
+}
+
+.page-sub {
+  margin: 4px 0 0;
+  font-size: 12.5px;
+  color: var(--c-muted);
+}
+
+.card {
+  background: #fff;
+  border: 1px solid var(--c-border);
+  border-radius: 6px;
+  padding: 14px 16px;
+}
+
+.card + .card {
+  margin-top: 14px;
+}
+
+.card-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 12px;
+  font-size: 14.5px;
+  font-weight: 700;
+  color: var(--c-navy);
+}
+
+/* ---------- 金额 / 数字 ---------- */
+
+.num {
+  font-variant-numeric: tabular-nums;
+  font-family: Consolas, 'Courier New', monospace;
+}
+
+.num-strong {
+  font-weight: 700;
+  color: var(--c-navy);
+}
+
+.num-total {
+  font-weight: 700;
+  color: var(--c-total);
+}
+
+.num-muted {
+  color: var(--c-muted);
+}
+
+.text-muted {
+  color: var(--c-muted);
+}
+
+.text-accent {
+  color: var(--c-accent-text);
+}
+
+/* ---------- 手录行 / 待询价 高亮（原型里的琥珀色语义） ---------- */
+
+.row-manual td.el-table__cell {
+  background: var(--c-accent-bg) !important;
+}
+
+.row-discontinued td.el-table__cell {
+  background: #fef2f2 !important;
+}
+
+.badge-manual {
+  display: inline-block;
+  padding: 0 6px;
+  border: 1px solid var(--c-accent-border);
+  border-radius: 3px;
+  background: var(--c-accent-bg);
+  color: var(--c-accent-text);
+  font-size: 11.5px;
+  line-height: 18px;
+}
+
+/* ---------- 双行并列费用表 ---------- */
+
+.dual-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.dual-table th,
+.dual-table td {
+  border: 1px solid var(--c-border);
+  padding: 6px 10px;
+}
+
+.dual-table thead th {
+  background: #f5f7fa;
+  color: var(--c-navy);
+  font-weight: 700;
+  text-align: center;
+}
+
+.dual-table td.label {
+  background: #fafbfc;
+  color: #4b5563;
+}
+
+.dual-table td.amount {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-family: Consolas, 'Courier New', monospace;
+}
+
+.dual-table tr.total-row td {
+  background: #fff7ed;
+  font-weight: 700;
+  color: var(--c-total);
+}
+
+.dual-table tr.quota-row td {
+  background: #f0f7ff;
+}
+
+/* ---------- 表单内联 ---------- */
+
+.inline-form .el-form-item {
+  margin-bottom: 10px;
+}
+
+.grid-2 {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 16px;
+}
+
+.grid-3 {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0 16px;
+}
+
+@media (max-width: 1100px) {
+  .grid-3 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* ---------- 表格微调 ---------- */
+
+.el-table .cell {
+  font-size: 13px;
+}
+
+.table-actions .el-button + .el-button {
+  margin-left: 4px;
+}
+
+
+/* AI 面板是 z-index 2100 的固定侧边栏，而 Element Plus 的浮层（下拉/选择器）
+   默认约 2000 —— 浮层会落在面板**底下**，表现为"点得着但选不中"。
+   这里把浮层抬到面板之上（2026-10-05 用户报障：解析方式只能选"自动"；
+   面板里的「供应商」下拉同样受影响）。浮层本来就该在最上层，影响面很小。 */
+.el-popper,
+.el-select__popper,
+.el-dropdown__popper,
+.el-picker__popper {
+  z-index: 2200 !important;
+}

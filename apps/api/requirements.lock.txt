@@ -1,0 +1,81 @@
+# 智能化弱电报价系统 · 后端依赖锁（Linux 已验证组合）
+#
+# 这份文件是 **pip freeze 的产物**，来自测试服务器上跑通过全部验收的那个 venv
+# （Python 3.14 + PostgreSQL 18）。安装时优先用它，而不是 pyproject 里的 `>=` 区间 ——
+# 区间会让不同时间、不同机器装出不同版本，出问题无法复现。
+#
+# 用法：
+#     .venv/bin/pip install -r apps/api/requirements.lock.txt
+#   deploy.sh 第 1 步与 deploy/remote_setup.sh 都会**优先**用这份锁；
+#   文件不存在时才退回从 pyproject.toml 抽依赖（旧行为）。
+#
+# 两点注意：
+#   1. **只在 Linux 上用**。里面含 httptools/uvloop 这类平台相关的轮子，Windows 开发机
+#      请直接用 pyproject 的区间安装（Windows 上 uvicorn[standard] 不会装 uvloop）。
+#   2. 故意不含 `passlib`：代码从 2026-09-30 起直接用 bcrypt
+#      （passlib 1.7.4 与 bcrypt>=4.1 不兼容，会让后端初始化就失败，详见 app/core/security.py）。
+#
+# 更新方式（改依赖后）：
+#     ssh 到服务器 → .venv/bin/pip freeze | sort > 新锁 → 提交
+#   然后跑一次 deploy.sh 确认能装、能起、验活通过。
+
+aiosqlite==0.22.1
+alembic==1.20.0
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.15.1
+asyncpg==0.31.0
+bcrypt==5.0.0
+certifi==2026.7.22
+cffi==2.1.1
+charset-normalizer==3.5.1
+click==8.5.0
+cryptography==50.0.1
+dnspython==2.8.0
+ecdsa==0.19.2
+email-validator==2.3.0
+et_xmlfile==2.0.0
+fastapi==0.141.1
+greenlet==3.5.6
+h11==0.16.0
+httpcore==1.0.9
+httptools==0.8.0
+httpx==0.28.1
+idna==3.20
+iniconfig==2.3.0
+loguru==0.7.3
+Mako==1.4.3
+MarkupSafe==3.0.3
+openpyxl==3.1.5
+packaging==26.3
+pillow==12.3.0
+pluggy==1.6.0
+psycopg==3.3.6
+psycopg-binary==3.3.6
+pyasn1==0.6.4
+pycparser==3.0
+pydantic==2.13.5
+pydantic_core==2.46.5
+pydantic-settings==2.15.0
+Pygments==2.21.0
+pypdf==6.19.0
+pytest==9.1.1
+pytest-asyncio==1.4.0
+python-dotenv==1.2.3
+python-jose==3.5.0
+python-multipart==0.0.32
+PyYAML==6.0.3
+reportlab==5.0.1
+rsa==4.9.1
+ruff==0.16.9
+setuptools==84.0.0
+six==1.17.0
+SQLAlchemy==2.1.1
+starlette==1.7.0
+typing_extensions==4.16.0
+typing-inspection==0.4.4
+uvicorn==0.54.0
+uvloop==0.22.1
+watchfiles==1.3.0
+websockets==17.1
+wheel==0.48.0

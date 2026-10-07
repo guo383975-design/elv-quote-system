@@ -1,0 +1,224 @@
+/* =========================================================================
+ * 网页打印 (Ctrl+P / window.print())
+ *
+ * 目标：用户在报价编辑页按打印后，直接出来一份可盖章的报价单。
+ *   - A4 竖向，12mm 页边距
+ *   - 隐藏侧边栏、顶部 header、按钮区、Tab 切换栏等交互元素
+ *   - 明细表全展开（不滚屏）
+ *   - 表头跨页重复，行尽量不跨页断开
+ *   - 字号收一档（屏幕 14px → 打印 11px）
+ *
+ * 设计选择：
+ *   - 不引入专用组件（如 vue-print-nb），标准 @media print 已能满足；
+ *     项目里只在一处需要打印，加一个组件反而引入状态。
+ *   - 通过给容器加 `print-area` 类来划定"可打印范围"，避免任何
+ *     全局样式把页面其它部分也漏出去。
+ *   - 工艺系数 / 税率等费率细节会被打出来（看 print-content 段）。
+ * ========================================================================= */
+
+@media print {
+  /* ---------- 页面规格：A4 竖向，12mm 边距 ---------- */
+  @page {
+    size: A4 portrait;
+    margin: 12mm;
+  }
+
+  html,
+  body {
+    margin: 0;
+    padding: 0;
+    background: #ffffff !important;
+    color: #000000;
+    /* 字号收一档：屏幕 14px → 打印 11px */
+    font-size: 11px;
+    line-height: 1.45;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  /* ---------- 隐藏整页交互外壳（侧栏、顶栏、面包屑） ---------- */
+  .app-aside,
+  .app-header,
+  .el-message,
+  .el-message-box,
+  .el-overlay,
+  .el-dialog__wrapper,
+  .el-popper,
+  /* 顶部 header 上的「导出/重算/费率/打印」等按钮组 —— 屏幕用，打印不要 */
+  .no-print,
+  /* el-table 的「操作」列：屏幕用，打印不要 */
+  .col-no-print,
+  th.col-no-print,
+  td.col-no-print {
+    display: none !important;
+  }
+
+  /* 让 main 区域把剩余空间吃满（顶栏/侧栏隐藏后） */
+  .app-shell,
+  .el-container,
+  .app-main {
+    height: auto !important;
+    overflow: visible !important;
+  }
+
+  .app-main {
+    background: #ffffff !important;
+    padding: 0 !important;
+  }
+
+  /* 页面主壳也去 padding / 圆角 / 阴影 */
+  .page,
+  .card {
+    padding: 0 !important;
+    margin: 0 !important;
+    background: transparent !important;
+    border: none !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+  }
+
+  /* ---------- Tab 切换条：打印只输出**当前页签**（2026-10-04 改，M-17） ----------
+     以前这里把每个 .el-tab-pane 都强制 display:block —— 结果是"报价明细 + 费率面板 +
+     操作记录"整本打出来。操作记录里有 IP / User-Agent，不该出现在给客户或归档的纸面上；
+     而且用户真正想打哪一页，本来就由他停在哪个页签决定。
+     现在只隐藏切换条本身，未激活的 pane 继续由 Element Plus 的 v-show 隐藏。 */
+  .el-tabs__nav-wrap,
+  .el-tabs__header {
+    display: none !important;
+  }
+  .el-tabs__content {
+    overflow: visible !important;
+    height: auto !important;
+  }
+
+  /* ---------- 明细表的关键 override ----------
+     Element Plus 的 el-table 在外层高度有限时会用 transform 把超出行藏起来，
+     打印时只看得见可视行。强制把所有内部容器改为 auto，浏览器会按表格
+     模式自然分页。 */
+  .el-table,
+  .el-table__body-wrapper,
+  .el-table__inner-wrapper,
+  .el-table__body,
+  .el-table__header-wrapper,
+  .el-table__header {
+    overflow: visible !important;
+    height: auto !important;
+    max-height: none !important;
+    width: 100% !important;
+  }
+
+  /* Element Plus 把表格渲染成一组 div，强制让 body / header 走回 table 语义，
+     让浏览器的分页算法接管。 */
+  .el-table__body,
+  .el-table__header {
+    display: table !important;
+    width: 100% !important;
+    table-layout: auto !important;
+  }
+
+  /* 表头每页重复出现 */
+  .el-table thead,
+  .el-table__header thead,
+  thead {
+    display: table-header-group !important;
+  }
+
+  /* tr 不跨页断开（force 一行不拆） */
+  .el-table tr,
+  table tr {
+    page-break-inside: avoid !important;
+    break-inside: avoid !important;
+  }
+
+  /* 表格整体不留外边距 */
+  .el-table {
+    border-collapse: collapse !important;
+    margin: 0 !important;
+    font-size: 11px !important;
+  }
+
+  /* 表格边框在打印时仍然显示，否则会变得很轻飘 */
+  .el-table th.el-table__cell,
+  .el-table td.el-table__cell {
+    border: 1px solid #888 !important;
+    padding: 4px 6px !important;
+    background: transparent !important;
+    color: #000 !important;
+  }
+
+  /* 高亮类（手录、停产）在打印中保留淡背景，方便审签 */
+  .row-manual td.el-table__cell {
+    background: #fff7ed !important;
+  }
+  .row-discontinued td.el-table__cell {
+    background: #fef2f2 !important;
+  }
+
+  /* 告警条（停产 / 待询价）打印时直接隐掉 —— 提示用的，不进盖章版 */
+  .el-alert.no-print,
+  .el-alert {
+    /* 留着风险告警方便审签：仅在标题栏上有 ⓘ/✕ 时不破坏布局 */
+    box-shadow: none !important;
+  }
+
+  /* 顶部页面标题：放大打印 */
+  .page-title {
+    font-size: 18px !important;
+    margin: 0 0 4mm !important;
+    color: #000 !important;
+  }
+  .page-sub {
+    font-size: 11px !important;
+    margin: 0 0 6mm !important;
+    color: #444 !important;
+  }
+
+  /* 让"打印容器"标题更突出 */
+  .print-only {
+    display: block !important;
+  }
+
+  /* 链接默认会显示 URL，黑乎乎的。打印时收掉 */
+  a[href]::after {
+    content: '' !important;
+  }
+
+  /* 折叠面板（费率面板）打印时强制展开 */
+  .el-collapse-transition,
+  .el-collapse-item__wrap,
+  .el-collapse-item__content {
+    display: block !important;
+    visibility: visible !important;
+    height: auto !important;
+    overflow: visible !important;
+  }
+  .el-collapse-item__header {
+    display: none !important;
+  }
+
+  /* el-input-number 在打印时把它包一层数字 div 取值会丢，这里强制显 inline-block */
+  .el-input-number {
+    display: inline-block !important;
+  }
+
+  /* 数字使用等宽字体保持对齐 */
+  .num {
+    font-family: Consolas, 'Courier New', monospace !important;
+  }
+
+  /* 页脚署名 */
+  .print-foot {
+    margin-top: 8mm;
+    padding-top: 4mm;
+    border-top: 1px dashed #888;
+    font-size: 10px;
+    color: #555;
+  }
+}
+
+/* 屏幕状态下隐藏 print-only */
+@media screen {
+  .print-only {
+    display: none !important;
+  }
+}

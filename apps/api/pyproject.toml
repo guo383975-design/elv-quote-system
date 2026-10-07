@@ -1,0 +1,91 @@
+[project]
+name = "quote-api"
+# 版本号要跟 apps/api/app/__init__.py 的 __version__、apps/web/package.json 一起改
+version = "0.1.3"
+description = "智能化弱电报价系统 API"
+authors = [{ name = "XX科技有限公司" }]
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.27.0",
+    "sqlalchemy[asyncio]>=2.0.25",
+    "asyncpg>=0.29.0",
+    # Alembic 走同步驱动，用 psycopg3（postgresql+psycopg://）。
+    # 原来声明的是 psycopg2-binary：Python 3.14 下没有预编译 wheel，
+    # 装它要现场编译（需要 libpq-dev + gcc）。
+    "psycopg[binary]>=3.1.18",
+    "alembic>=1.13.1",
+    "pydantic[email]>=2.6.0",
+    "pydantic-settings>=2.1.0",
+    "python-jose[cryptography]>=3.3.0",
+    # 不再用 passlib：1.7.4 与 bcrypt>=4.1 不兼容（后端初始化必炸），
+    # 且 2020 年后再无发布。直接用 bcrypt，哈希格式仍是 $2b$12$。
+    "bcrypt>=4.1.2",
+    "python-multipart>=0.0.9",
+    "openpyxl>=3.1.2",
+    "pypdf>=5.0.0",
+    # pandas 已移除：全仓库没有任何一处 import，属于多余的重量级依赖。
+    # PDF 导出：纯 Python，不需要 wkhtmltopdf / chromium / libreoffice
+    # （服务器上这些都没有，也不该为了导个报价单去装一个浏览器）。
+    # 中文字形必须靠字体文件嵌入，见 app/services/export_pdf.py 的字体查找逻辑。
+    "reportlab>=4.0.0",
+    "python-dotenv>=1.0.0",
+    "loguru>=0.7.2",
+    "httpx>=0.26.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.3.0",
+    "mypy>=1.8.0",
+    "alembic>=1.13.0",
+    "aiosqlite>=0.19.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4"]
+
+# E501（行超长）只在 tests/ 和 scripts/ 下豁免。
+# 理由：这两处的超长行几乎全是**中文断言语义说明**和**定额/设备种子数据表格**，
+# 拆成多行会让本来一眼能对的表格变成难以核对的碎片，可读性是净损失。
+# app/ 和 alembic/ 是真正出货的代码，一律保持 100 列，不放宽。
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["E501"]
+"scripts/**" = ["E501"]
+
+# B008（不要在参数默认值里调用函数）会命中 FastAPI 的标准写法
+# `page: int = Query(1, ge=1)`。ruff 提供了专门的豁免配置，
+# 把 FastAPI 的这几个「不可变调用」声明出来，比整个忽略 B008 精确。
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = [
+    "fastapi.Query",
+    "fastapi.Path",
+    "fastapi.Body",
+    "fastapi.Header",
+    "fastapi.Cookie",
+    "fastapi.Form",
+    "fastapi.File",
+    "fastapi.Depends",
+    "fastapi.Security",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = false
+ignore_missing_imports = true
