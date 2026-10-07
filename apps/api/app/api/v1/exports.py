@@ -244,7 +244,8 @@ async def export_quote_pdf(
     ctx = build_context(
         quote=quote, project=project, items=items, subsystems=subsystems,
         include_cost=include_cost,
-        show_spec_column=include_cost,   # 客户版 PDF 不出参数列 ✓（内部版=include_cost=True → 出 ✓）
+        # 客户版 PDF 不出参数列 ✓（内部版 True 时出 ✓）——2026-10-05 用户要求 C
+        show_spec_column=include_cost,
         settings=await load_export_settings(db),
     )
     from starlette.concurrency import run_in_threadpool as _rt
