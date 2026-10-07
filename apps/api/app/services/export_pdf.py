@@ -271,6 +271,17 @@ _WRAPPABLE_FLOORS: dict[str, float] = {
     "备注": 38.0,
 }
 
+# 按列上限（2026-10-05 用户反馈 ✓）：**比例上限 0.30 对"设备参数/备注"太宽容** ✗ ——
+#   参数一长就把整页宽度吃掉 ✓，害得名称/品牌/型号/价格竖排 ✓（客户看着难受 ✓）。
+#   这里给具体列单独设上限（占可用宽度的比例 ✓），其余仍走 _WRAPPABLE_MAX_RATIO ✓。
+#   原则：**多行无所谓的列（参数/备注）让位，需要一眼读到的列（名称/单价）优先** ✓。
+_WRAPPABLE_CAPS: dict[str, float] = {
+    "设备参数": 0.12,
+    "备注": 0.12,
+    "设备/材料名称": 0.26,
+}
+
+
 # 空间充足时单列可折行列最多占可用宽度的 30%，免得一列吃掉整张表。
 _WRAPPABLE_MAX_RATIO = 0.30
 
@@ -552,9 +563,18 @@ def _fit_widths(
         # 没有可折行列（费用表/子系统表）：余量按各自需求等比放大，比例不变。
         return _normalize(hard, _USABLE_WIDTH)
 
+    def _cap(header: str) -> float:
+        # 具体列优先 ✓（设备参数/备注收紧、名称给足 ✓），其余走默认 30% ✓
+        return _USABLE_WIDTH * _WRAPPABLE_CAPS.get(header.strip(), _WRAPPABLE_MAX_RATIO)
+
     wants = [
-        min(n, _USABLE_WIDTH * _WRAPPABLE_MAX_RATIO) if w else 0.0
-        for n, w in zip(needs.natural, needs.wrappable, strict=True)
+        min(n, _caps) if w else 0.0
+        for n, w, _caps in zip(
+            needs.natural,
+            needs.wrappable,
+            (_cap(h) for h in headers),
+            strict=True,
+        )
     ]
     rest = _USABLE_WIDTH - needs.hard_sum
     want_sum = sum(wants[i] for i in wrap_index)
