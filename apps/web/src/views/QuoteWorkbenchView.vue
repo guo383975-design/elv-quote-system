@@ -681,6 +681,8 @@ function moveClause(idx: number, delta: number): void {
   clausesDraft.value.splice(target, 0, row)
 }
 
+void loadStandardClauses()   // 后台标准条款（勾选清单 ✓，2026-10-05）
+
 async function loadClauses(): Promise<void> {
   if (!quoteId.value) return
   try {
@@ -689,23 +691,107 @@ async function loadClauses(): Promise<void> {
     clausesDraft.value = [...(d.clauses ?? [])]
     validDaysDraft.value = d.valid_days ?? 30
     useOwnClauses.value = !!(d.clauses_overridden || d.valid_days_overridden)
+    // 每单数字：用**生效值**回填 ✓（本单覆盖过就是本单值 ✓，否则是系统设置值 ✓）
+    const vars = (d.variables ?? {}) as Record<string, unknown>
+    for (const k of Object.keys(termsDraft) as Array<keyof typeof termsDraft>) {
+      const v = vars[k]
+      if (v !== undefined && v !== null && !Number.isNaN(Number(v))) {
+        termsDraft[k] = Number(v)
+      }
+    }
+    // 策略三项：从报价单本体读 ✓
+    const q = quote.value as unknown as {
+      tax_method?: string
+      tax_rate?: number | string
+      labor_float_rate?: number | string
+    } | null
+    if (q) {
+      if (q.tax_method) taxMethodDraft.value = q.tax_method
+      if (q.tax_rate !== undefined && q.tax_rate !== null) {
+        taxRateDraft.value = Number(q.tax_rate) * 100        // 存的是比率 ✓ 显示百分数 ✓
+      }
+      if (q.labor_float_rate !== undefined && q.labor_float_rate !== null) {
+        laborFloatDraft.value = Number(q.labor_float_rate) * 100
+      }
+    }
   } catch {
     clausesData.value = null
   }
 }
 
+// ---- 每单条款数字（2026-10-05）----
+// 6 个变量的本单取值 ✓（对应后端 quotes.terms_override ✓）。
+// 文字里仍然写 {变量} ✓ —— 数字改了，条款那句话自动跟着变 ✓（用户决策 ③A ✓）。
+const termsDraft = reactive({
+  valid_days: 30,
+  prepay_ratio: 30,
+  accept_ratio: 60,
+  warranty_ratio: 10,
+  warranty_months: 12,
+  build_days: 45,
+})
+
+/** 后台维护的标准条款（可勾选 ✓） */
+const standardClauses = ref<string[]>([])
+
+async function loadStandardClauses(): Promise<void> {
+  try {
+    const { data } = await http.get('/settings')
+    const q = ((data as Record<string, any>)?.quote ?? {}) as Record<string, unknown>
+    standardClauses.value = ((q.clauses ?? []) as unknown[]).map((c) => String(c))
+  } catch {
+    standardClauses.value = []      // 拿不到就不显示勾选清单 ✓，手写条款照常可用 ✓
+  }
+}
+
+/** 这条标准条款是否已在本单里 ✓ */
+function hasStandard(text: string): boolean {
+  return clausesDraft.value.some((c) => c.trim() === text.trim())
+}
+
+/** 勾选/取消一条标准条款 ✓（勾上=追加到本单 ✓；取消=从本单移除 ✓） */
+function toggleStandard(text: string): void {
+  if (hasStandard(text)) {
+    clausesDraft.value = clausesDraft.value.filter((c) => c.trim() !== text.trim())
+  } else {
+    clausesDraft.value = [...clausesDraft.value, text]
+  }
+}
+
+// ---- 报价策略（用户决策 ④：只开放这四项 ✓）----
+const taxMethodDraft = ref<string>('general_9pct')
+const taxRateDraft = ref<number>(9)
+const laborFloatDraft = ref<number>(0)
+
 async function saveClauses(): Promise<void> {
   if (!quoteId.value) return
   clausesSaving.value = true
   try {
-    const payload = useOwnClauses.value
-      ? {
-          clauses_override: clausesDraft.value.map((c) => c.trim()).filter(Boolean),
-          valid_days_override: validDaysDraft.value,
-        }
-      : { clauses_override: null, valid_days_override: null }
+    // 只把**改动过的**数字写成本单覆盖 ✓（没改的继承系统设置 ✓，避免把默认值固化成死数 ✓）
+    const termsOverride: Record<string, number> = {}
+    for (const [k, v] of Object.entries(termsDraft)) {
+      const base = Number((clausesData.value?.variables ?? {})[k] ?? v)
+      if (Math.abs(Number(v) - base) > 1e-9) termsOverride[k] = Number(v)
+    }
+    const payload = {
+      clauses_override: useOwnClauses.value
+        ? clausesDraft.value.map((c) => c.trim()).filter(Boolean)
+        : null,
+      valid_days_override: useOwnClauses.value ? validDaysDraft.value : null,
+      // 每单数字 ✓：勾了"本单自选"才写 ✓（否则清空覆盖 ✓，回到系统设置 ✓）
+      terms_override: useOwnClauses.value ? termsOverride : null,
+      // 策略三项（用户决策 ④ ✓）：一直可改 ✓
+      tax_method: taxMethodDraft.value,
+      tax_rate: Number(taxRateDraft.value) / 100,
+      labor_float_rate: Number(laborFloatDraft.value) / 100,
+    }
     await quoteApi.update(quoteId.value, payload as never)
-    ElMessage.success(useOwnClauses.value ? '本单已用自定义条款' : '已恢复为系统设置里的条款')
+    ElMessage.success(
+      useOwnClauses.value
+        ? `本单已用自定义条款${Object.keys(termsOverride).length ? `（${Object.keys(termsOverride).length} 个数字本单生效 ✓）` : ''}`
+        : '已恢复为系统设置里的条款',
+    )
+    await saveAndCompute()          // 税率/浮动变了 → 金额要重算 ✗ 不然合计是旧值 ✓
     await loadClauses()
   } catch (e) {
     ElMessage.error(e instanceof Error ? e.message : '保存失败')
@@ -1714,6 +1800,24 @@ async function confirmBatch(): Promise<void> {
           </span>
         </div>
 
+            <div v-if="standardClauses.length" class="mb">
+              <div class="text-muted" style="margin-bottom: 4px">
+                后台标准条款（点一下加入本单 ✓ / 再点移除 ✓）：
+              </div>
+              <div>
+                <el-tag
+                  v-for="(c, i) in standardClauses"
+                  :key="i"
+                  :type="hasStandard(c) ? 'success' : 'info'"
+                  :effect="hasStandard(c) ? 'dark' : 'plain'"
+                  size="small"
+                  style="cursor: pointer; margin: 0 6px 6px 0"
+                  @click="toggleStandard(c)"
+                >
+                  {{ hasStandard(c) ? '✓ ' : '＋ ' }}{{ c.length > 34 ? c.slice(0, 34) + '…' : c }}
+                </el-tag>
+              </div>
+            </div>
         <el-radio-group v-model="useOwnClauses" class="mb">
           <el-radio :value="false">用系统设置（所有单共用）</el-radio>
           <el-radio :value="true">本单自定义</el-radio>
@@ -1722,7 +1826,36 @@ async function confirmBatch(): Promise<void> {
         <template v-if="useOwnClauses">
           <el-form label-width="110px" class="mb">
             <el-form-item label="本单有效期">
-              <el-input-number v-model="validDaysDraft" :min="1" :max="365" :precision="0" />
+              <div class="st-terms">
+                <div class="st-term">
+                  <span>有效期（天）</span>
+                  <el-input-number v-model="termsDraft.valid_days" :min="1" :max="3650" :precision="0" size="small" />
+                </div>
+                <div class="st-term">
+                  <span>预付比例（%）</span>
+                  <el-input-number v-model="termsDraft.prepay_ratio" :min="0" :max="100" :precision="0" size="small" />
+                </div>
+                <div class="st-term">
+                  <span>验收后付款（%）</span>
+                  <el-input-number v-model="termsDraft.accept_ratio" :min="0" :max="100" :precision="0" size="small" />
+                </div>
+                <div class="st-term">
+                  <span>质保金（%）</span>
+                  <el-input-number v-model="termsDraft.warranty_ratio" :min="0" :max="100" :precision="0" size="small" />
+                </div>
+                <div class="st-term">
+                  <span>质保期（月）</span>
+                  <el-input-number v-model="termsDraft.warranty_months" :min="0" :max="120" :precision="0" size="small" />
+                </div>
+                <div class="st-term">
+                  <span>工期（日历天）</span>
+                  <el-input-number v-model="termsDraft.build_days" :min="1" :max="3650" :precision="0" size="small" />
+                </div>
+                <div class="text-muted" style="grid-column: 1 / -1; font-size: 12px">
+                  ↑ 这些数字改动**只对本单生效** ✓；条款文字里仍写 <code>{valid_days}</code> 这样的变量 ✓，
+                  导出时会自动替换成上面的值 ✓。
+                </div>
+              </div>
               <span class="text-muted ml">天</span>
             </el-form-item>
           </el-form>
@@ -1756,6 +1889,28 @@ async function confirmBatch(): Promise<void> {
           </ol>
         </div>
 
+            <div class="mb" style="border-top: 1px dashed var(--el-border-color); padding-top: 8px">
+              <div class="text-muted" style="margin-bottom: 4px">
+                报价策略（本单生效 ✓，与条款一起在「保存条款设置」时提交 ✓）：
+              </div>
+              <div class="st-terms">
+                <div class="st-term">
+                  <span>计税方式</span>
+                  <el-select v-model="taxMethodDraft" size="small" style="width: 150px">
+                    <el-option label="一般计税 9%" value="general_9pct" />
+                    <el-option label="简易计税 3%" value="simple_3pct" />
+                  </el-select>
+                </div>
+                <div class="st-term">
+                  <span>税率（%）</span>
+                  <el-input-number v-model="taxRateDraft" :min="0" :max="100" :precision="0" size="small" />
+                </div>
+                <div class="st-term">
+                  <span>人工费浮动（%）</span>
+                  <el-input-number v-model="laborFloatDraft" :min="-50" :max="200" :precision="0" size="small" />
+                </div>
+              </div>
+            </div>
         <el-button type="primary" :loading="clausesSaving" @click="saveClauses">保存条款设置</el-button>
         <el-button @click="useOwnClauses = false; saveClauses()">恢复用系统设置</el-button>
         <div v-if="clausesData?.clauses_overridden || clausesData?.valid_days_overridden"
@@ -1820,6 +1975,10 @@ async function confirmBatch(): Promise<void> {
   </template>
 
 <style scoped>
+.st-terms { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px 12px; }
+.st-term { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.st-term > span:first-child { width: 96px; color: var(--el-text-color-secondary); }
+
 .wb {
   display: flex;
   flex-direction: column;
