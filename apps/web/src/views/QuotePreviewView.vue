@@ -79,6 +79,84 @@ function pageContentHeight(): number {
   return (contentW / printableW) * printableH      // 单位：px ✓
 }
 
+// ==================== A 步骤①：分页计划（只算不画 ✓）====================
+// 2026-10-05 ✓：客户版要"每页各自写页码"✗，就必须先知道**每一页放哪些行** ✓。
+// 本函数只做计算 ✓，把计划写进 __qpDebug ✓（渲染照旧 ✗ → 零视觉风险 ✓）。
+// 用**普通数组**存计划 ✓（响应式代理在 JSON.stringify 里会丢内容 ✗，实测过 ✓）
+const pagePlanText = ref<string>('')
+
+function buildPagePlan(): void {
+  const sheet = sheetRef.value
+  if (!sheet) return
+  const pageH = pageContentHeight()
+  const pick = (sel: string) => sheet.querySelector(sel) as HTMLElement | null
+  const hOf = (el: HTMLElement | null) => (el ? el.offsetHeight : 0)
+
+  const headH = hOf(pick('.doc-head'))
+  const infoH = hOf(pick('.doc-info'))
+  const bottomH = hOf(pick('.doc-bottom'))
+  const signH = hOf(pick('.doc-sign'))
+  const theadH = hOf(pick('.doc-table thead'))
+  const rows = Array.from(sheet.querySelectorAll('.doc-table tbody tr')) as HTMLElement[]
+
+  const plan: Array<Record<string, unknown>> = []
+  let page = 1
+  let used = headH + infoH
+  let tableStarted = false
+  let onPage = 0
+  let firstRow = 0
+  let lastRow = -1
+  const push = (tail: string) => {
+    plan.push({
+      page,
+      usedPx: Math.round(used),
+      rowFrom: firstRow,
+      rowTo: lastRow,
+      rows: onPage,
+      tail,
+    })
+  }
+
+  for (let i = 0; i < rows.length; i++) {
+    const rh = rows[i].offsetHeight
+    if (!tableStarted) {
+      used += theadH           // 首页要放表头 ✓
+      tableStarted = true
+    }
+    if (used + rh > pageH) {
+      push('')                 // 本页到此为止 ✓
+      page += 1
+      used = theadH            // 续页重复表头 ✓
+      onPage = 0
+      firstRow = i
+    }
+    used += rh
+    lastRow = i
+    onPage += 1
+  }
+
+  // 最后一块：剩余不足半页 → 整块另起一页 ✓（用户明确要求 ✓）
+  const tailH = bottomH + signH
+  const remain = pageH - used
+  const breakTail = rows.length > 0 && remain < pageH / 2 && tailH <= pageH
+  if (breakTail) {
+    push('余额不足半页 → 报价说明整块另起一页')
+    page += 1
+    used = tailH
+    onPage = 0
+    firstRow = -1
+    lastRow = -1
+  } else {
+    used += tailH
+  }
+  push('末尾（报价说明+费用+签章）')
+
+  pagePlanText.value = JSON.stringify(plan, null, 1)
+  // 页数以**计划**为准 ✓（2026-10-05 实测：按流的长度算会漏掉"插入的分页" ✗
+  //   → 屏幕说 1 页、打印 2 页 ✓）。计划里最后一个 page 就是总页数 ✓。
+  if (plan.length) pageCount.value = Number(plan[plan.length - 1].page)
+}
+
 /** 量一次：页数 + 报价说明那块要不要另起一页 ✓ */
 function measurePagination(): void {
   const sheet = sheetRef.value
@@ -199,6 +277,7 @@ onMounted(() => {
   setTimeout(measurePagination, 1500)
   setTimeout(() => {
     measurePagination()
+    buildPagePlan()          // A 步骤①：同时算一份分页计划 ✓（只算不画 ✓）
     // 把量到的关键数字挂到 window 上 ✓：便于"预览自检"脚本把真实几何打出来 ✓
     ;(window as unknown as Record<string, unknown>).__qpDebug = {
       pageH: pageContentHeight(),
@@ -207,6 +286,7 @@ onMounted(() => {
       blockH: bottomRef.value?.offsetHeight ?? 0,
       breakGap: breakGap.value,
       pageCount: pageCount.value,
+      plan: pagePlanText.value,
     }
   }, 2000)
   const el = sheetRef.value
