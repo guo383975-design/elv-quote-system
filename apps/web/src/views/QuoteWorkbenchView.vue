@@ -1067,6 +1067,14 @@ async function onQuotaPicked(q: { code: string; name?: string }): Promise<void> 
   await saveAndCompute()
 }
 
+/** 设备单价（销售价）就地改（2026-10-05 用户要求 ✓）：
+ *  以前这一列**只能看不能改** ✗ —— 设备库里那个价只是"建议零售价" ✓，
+ *  实际卖多少由报价人自己填 ✓，所以必须可改 ✓。改完自动重算合计 ✓。 */
+async function onDevicePriceChange(row: { id: string }, v: number | undefined): Promise<void> {
+  await quoteApi.updateItem(quoteId.value, row.id, { unit_price: v ?? 0 })
+  await saveAndCompute()
+}
+
 /** 安装单价就地改（用户 ②：以前只能在编辑弹窗改 ✗） */
 async function onInstallPriceChange(row: { id: string }, v: number | undefined): Promise<void> {
   await quoteApi.updateItem(quoteId.value, row.id, { install_unit_price: v ?? 0 })
@@ -1516,8 +1524,18 @@ const clausesVisible = ref(false)
               />
             </template>
           </el-table-column>
-          <el-table-column label="设备单价" width="106" align="right">
-            <template #default="{ row }"><span class="num">{{ money(row.unit_price) }}</span></template>
+          <el-table-column label="设备单价（可改）" width="128" align="right">
+            <template #default="{ row }">
+              <el-input-number
+                :model-value="toNum(row.unit_price)"
+                :min="0"
+                :precision="2"
+                :controls="false"
+                size="small"
+                style="width: 100%"
+                @change="(v: number | undefined) => onDevicePriceChange(row, v)"
+              />
+            </template>
           </el-table-column>
           <!-- 安装单价：**就地可编辑**（2026-10-05 用户要求）——
                以前只有点开编辑弹窗才能改 ✗；设备库也不再维护这个值 ✓ -->

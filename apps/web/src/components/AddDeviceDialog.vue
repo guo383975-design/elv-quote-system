@@ -7,7 +7,7 @@
  *   ② 页签：从设备库选择 / 按点位模板批量生成 / 手动录入
  *   ③ 筛选行：分类 / 全部品牌 / 状态 / 搜索 / 只看常用设备 / 按最近询价排序 ｜ 匹配 N 条
  *   ④ 左侧：分类计数列表（全部设备 + 各分类数量）   ⑤ 中间：设备表（可勾选）
- *   ⑥ 右侧：设备详情（参考价 / 最近询价 / 成本价 / 安装单价 / 起订量 / 质保 / 状态）
+ *   ⑥ 右侧：设备详情（建议零售价 / 最近询价 / 成本价 / 安装单价 / 起订量 / 质保 / 状态）
  *   ⑦ 底部：+ 手动新增设备 / 材料 ｜ 已选 N 项 ｜ 取消 / 确定加入
  *
  * 未实现的两项（原型有、后端没有）一律**置灰 + 说明**，不做假控件：
@@ -376,7 +376,7 @@ onMounted(() => {
                 <template #default="{ row }">{{ row.model || '—' }}</template>
               </el-table-column>
               <el-table-column label="单位" width="56" prop="unit" />
-              <el-table-column label="参考价" width="96" align="right">
+              <el-table-column label="建议零售价" width="96" align="right">
                 <template #default="{ row }"><span class="num">{{ money(row.reference_price) }}</span></template>
               </el-table-column>
               <el-table-column label="安装单价" width="90" align="right">
@@ -414,7 +414,7 @@ onMounted(() => {
               <div class="ad-detail-name">{{ detail.name }}</div>
               <div class="ad-row"><span>品牌 · 型号</span><span>{{ detail.brand || '—' }} · {{ detail.model || '—' }}</span></div>
               <div class="ad-row"><span>规格说明</span><span>{{ detail.spec || '—' }}</span></div>
-              <div class="ad-row"><span>参考价</span><span class="num strong">{{ money(detail.reference_price) }} 元/{{ detail.unit }}</span></div>
+              <div class="ad-row"><span>建议零售价</span><span class="num strong">{{ money(detail.reference_price) }} 元/{{ detail.unit }}</span></div>
               <div class="ad-row">
                 <span>最近询价</span>
                 <span>
