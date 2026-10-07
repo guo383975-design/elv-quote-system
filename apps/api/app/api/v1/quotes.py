@@ -405,6 +405,23 @@ async def create_quote(
     elif await db.scalar(select(Quote).where(Quote.code == code)):
         raise HTTPException(status_code=409, detail=f"报价单编号 {code} 已存在")
 
+    # ---- 增项：从原单复制（2026-10-05 用户要求）----
+    _based_on = data.pop("based_on_quote_id", None)
+    _src: Quote | None = None
+    if _based_on:
+        _src = await db.get(Quote, _based_on)
+        if _src is None:
+            raise HTTPException(status_code=404, detail="增项来源的报价单不存在")
+        # 费率/条款快照：调用方显式传了就不覆盖 ✓（与本仓库"创建时定"的既有做法一致 ✓）
+        for _f in (
+            "tax_method", "tax_rate", "fee_base", "auxiliary_base", "auxiliary_rate",
+            "design_rate", "warranty_rate", "training_fee", "mgmt_profit_rate",
+            "labor_float_rate", "labor_float_per_class", "terms_override",
+            "valid_days_override", "install_mode",
+        ):
+            if data.get(_f) is None and getattr(_src, _f, None) is not None:
+                data[_f] = getattr(_src, _f)
+
     data["code"] = code
     if not (data.get("title") or "").strip():
         data["title"] = f"{project.name} 报价单"
@@ -469,6 +486,52 @@ async def create_quote(
     )
     await db.refresh(quote)
     log.info(f"创建报价单 {quote.code} v{quote.version}")
+    # 增项：把原单明细整份复制过来 ✓（含父子关系 ✓ 旧 id → 新 id 映射 ✓）
+    if _src is not None:
+        _rows = list(
+            (
+                await db.scalars(
+                    select(QuoteItem)
+                    .where(QuoteItem.quote_id == _src.id)
+                    .order_by(QuoteItem.sort_order, QuoteItem.created_at)
+                )
+            ).all()
+        )
+        _idmap: dict[UUID, UUID] = {}
+        for _r in _rows:
+            _new = QuoteItem(
+                quote_id=quote.id,
+                subsystem_id=_r.subsystem_id,
+                device_id=_r.device_id,
+                name=_r.name,
+                brand=_r.brand,
+                model=_r.model,
+                spec_text=_r.spec_text,
+                unit=_r.unit,
+                quantity=_r.quantity,
+                unit_price=_r.unit_price,
+                cost_price=_r.cost_price,
+                install_unit_price=_r.install_unit_price,
+                auxiliary_unit_price=_r.auxiliary_unit_price,
+                is_owner_supplied=_r.is_owner_supplied,
+                is_cat5e=_r.is_cat5e,
+                is_ceiling=_r.is_ceiling,
+                notes=_r.notes,
+                sort_order=_r.sort_order,
+                source=_r.source,
+            )
+            db.add(_new)
+            await db.flush()
+            _idmap[_r.id] = _new.id
+        # 父子关系补齐 ✓（父行可能排在子行之后 ✓ 所以复制完再统一映射 ✓）
+        for _r in _rows:
+            if _r.parent_item_id and _r.parent_item_id in _idmap:
+                _child = await db.get(QuoteItem, _idmap[_r.id])
+                if _child is not None:
+                    _child.parent_item_id = _idmap[_r.parent_item_id]
+        await db.flush()
+        quote.based_on_quote_id = _src.id
+
     return quote
 
 
@@ -580,6 +643,25 @@ _ENUM_RATE_FIELDS = {
 }
 
 
+def _assert_not_archived_revert(quote: Quote, new_status: object) -> None:
+    """归档是不可逆的：不许把 archived 改回任何其它状态（2026-10-05 用户要求）。
+
+    为什么单独加一道：_assert_editable 只挡"直接改内容" ✗，
+    但状态退回 draft 是**允许**的 ✗ → 有 quote.APPROVE 的人退回草稿后照样能改 ✓，
+    归档的锁就形同虚设 ✓。approved → draft 的退回**保留** ✓（那是正常审批流程 ✓）。
+    """
+    if str(quote.status) == str(QuoteStatus.ARCHIVED) and str(new_status) != str(
+        QuoteStatus.ARCHIVED
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "归档的报价单不可修改，也不可退回其它状态（归档即定稿）。"
+                "如需在此基础上增项，请新建一张关联本单的报价单。"
+            ),
+        )
+
+
 def _assert_editable(quote: Quote, user: User) -> None:
     """已批准/已归档的报价单：先退回草稿（需要 quote.APPROVE）才能改。"""
     if str(quote.status) in {str(s) for s in _LOCKED_STATUSES}:
@@ -648,6 +730,8 @@ async def update_quote(
     if status_changing:
         from_status = str(quote.status)
         target_status = str(new_status)
+        # 归档不可逆（2026-10-05 用户要求）：宁可让用户新建增项单，也不许解开归档 ✓
+        _assert_not_archived_revert(quote, target_status)
 
         # 第一关：方向合法吗（业务规则）
         if not can_move_quote(from_status, target_status):

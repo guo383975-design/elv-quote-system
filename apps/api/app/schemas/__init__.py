@@ -568,6 +568,9 @@ class QuoteCreate(BaseModel):
     #   manual = 手工设置人工费（默认，兼容老调用方 / 脚本）
     #   quota  = 套定额（人工费按定额库取）
     install_mode: Literal["manual", "quota"] = "manual"
+    # 增项来源（2026-10-05）：本单从哪张报价单增项而来 ✓
+    #   带上它 → 自动复制原单的费率/条款与明细 ✓（归档单尤其需要这样增项 ✓）
+    based_on_quote_id: UUID | None = None
     auxiliary_base: AuxiliaryBaseType = AuxiliaryBaseType.DEVICE
     auxiliary_rate: Decimal = Field(Decimal("0.06"), ge=RATE_MIN, le=RATE_MAX)
     design_rate: Decimal = Field(Decimal("0.02"), ge=RATE_MIN, le=RATE_MAX)
@@ -647,6 +650,8 @@ class QuoteUpdate(BaseModel):
 class QuoteOut(ORMBase):
     # 安装单价方式（2026-10-05）：缺省 manual ✓（老单子不受影响 ✓）
     install_mode: str = "manual"
+    # 增项来源（2026-10-05）：前端据此显示「增项自 <原单号>」✓
+    based_on_quote_id: UUID | None = None
     id: UUID
     project_id: UUID
     code: str

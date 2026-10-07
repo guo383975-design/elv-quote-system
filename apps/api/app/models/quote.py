@@ -108,6 +108,10 @@ class Quote(UUIDPKMixin, TimestampMixin, Base):
     clauses_override: Mapped[list[Any] | None] = mapped_column(JSONType, nullable=True)
     # 单据级有效期覆盖（天）：NULL = 用系统设置
     valid_days_override: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 增项来源：本单是从哪张报价单增项而来（2026-10-05 用户要求）
+    based_on_quote_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("quotes.id", ondelete="SET NULL"), nullable=True
+    )
 
     # 每单条款数字覆盖（2026-10-05）：6 个变量的本单取值 ✓
     #   {valid_days, prepay_ratio, accept_ratio, warranty_ratio,
