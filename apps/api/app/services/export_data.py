@@ -316,13 +316,15 @@ def ordered_subsystems(subsystems: Iterable[Any]) -> list[Any]:
 def build_subsystem_rows(subsystems: Iterable[Any]) -> list[ExportSubsystemRow]:
     """子系统小计。"""
     out: list[ExportSubsystemRow] = []
-    for i, s in enumerate(ordered_subsystems(subsystems), start=1):
+    for s in ordered_subsystems(subsystems):
         eq = Decimal(str(s.equipment_subtotal or 0))
         ins = Decimal(str(s.install_subtotal or 0))
         aux = Decimal(str(s.auxiliary_subtotal or 0))
+        if eq + ins + aux == 0:
+            continue                     # 全零子系统不上客户版 ✓
         out.append(
             ExportSubsystemRow(
-                seq=i,
+                seq=len(out) + 1,
                 name=_s(getattr(s, "custom_name", "")) or label_of(
                     "subsystem_type", getattr(s, "subsystem_type", "")
                 ),
@@ -518,12 +520,21 @@ def build_context(
     """
     now = generated_at or datetime.now()
     ordered = ordered_subsystems(subsystems)
-    subs = build_subsystem_rows(ordered)
-    # strict=True：两个列表都由同一份 ordered 生成，长度必然相等。
-    # 写 strict 是为了万一以后有人改了其中一个的过滤逻辑，这里会立刻炸而不是错位。
+    # ⚠ 名称映射必须覆盖**全部**子系统 ✓（2026-10-05 修 500 的真因 ✓）：
+    #   subs 会因为"全零子系统不上客户版"而**变短** ✓（见 build_subsystem_rows ✓），
+    #   而明细行是按 subsystem_id 查名字的 ✓ → 映射缺了就会 KeyError ✓。
+    #   原先这里用 zip(ordered, subs, strict=True) 配对 ✗：
+    #   那个 strict 是**防错哨兵** ✓（注释里写着"以后有人改了过滤逻辑，这里会立刻炸" ✓）
+    #   —— 我加过滤时它确实立刻炸了 ✓（ValueError → 导出 500 ✓）。
+    #   所以这里改成**不依赖两边等长**的写法 ✓：名字直接从 ordered 取 ✓。
     name_by_id = {
-        str(getattr(s, "id", "")): row.name for s, row in zip(ordered, subs, strict=True)
+        str(getattr(s, "id", "")): (
+            _s(getattr(s, "custom_name", ""))
+            or label_of("subsystem_type", getattr(s, "subsystem_type", ""))
+        )
+        for s in ordered
     }
+    subs = build_subsystem_rows(ordered)
     # 单据级覆盖（每张单可自定义条款/有效期）→ 全局设置 → 常量
     _exp = _export_settings(settings, settings_overrides=_quote_overrides(quote))
 
