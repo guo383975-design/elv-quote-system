@@ -338,6 +338,24 @@ def build_subsystem_rows(subsystems: Iterable[Any]) -> list[ExportSubsystemRow]:
     return out
 
 
+def _strip_model_prefix(name: str, model: str) -> str:
+    """客户版显示名：若名称开头就是型号，则剥掉它（2026-10-05 ✓）。
+
+    为什么 ✓：导入时名称被写成「型号 + 空格 + 品名」✗（实测 314 台里 304 台如此 ✓），
+    而表格另有「型号规格」列 ✓ → 客户版上型号会重复出现 ✓。
+    只影响显示 ✓，**不改任何数据** ✗。
+    """
+    n, m = (name or "").strip(), (model or "").strip()
+    if not n or not m or n == m:
+        return n
+    for sep in (" ", "　", "-", "_"):
+        if n.startswith(m + sep):
+            return n[len(m) + len(sep):].strip() or n
+    if n.startswith(m):
+        return n[len(m):].strip() or n
+    return n
+
+
 def build_item_rows(
     items: Sequence[Any],
     *,
@@ -388,8 +406,9 @@ def build_item_rows(
                 subsystem=sub,
                 # 子目行（挂在主设备下 ✓）名称前加缩进 → 导出/打印呈广联达式层级 ✓
                 # （2026-10-05 阶段2；只动显示，不动任何金额 ✓）
-                name=(('　　└ ' + _s(it.name))
-                      if getattr(it, 'parent_item_id', None) else _s(it.name)),
+                name=(('　　└ ' + _strip_model_prefix(_s(it.name), _s(getattr(it, "model", ""))))
+                      if getattr(it, 'parent_item_id', None)
+                      else _strip_model_prefix(_s(it.name), _s(getattr(it, "model", "")))),
                 brand=_s(getattr(it, "brand", "")),
                 model=_s(getattr(it, "model", "")),
                 unit=_s(getattr(it, "unit", "")) or "台",

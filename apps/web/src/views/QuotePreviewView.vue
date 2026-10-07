@@ -253,6 +253,19 @@ async function loadSubsystems(): Promise<void> {
 
 
 /** 客户版单行金额：单价 = 设备单价 + 安装单价（原型里 680 + 80 = 760）。 */
+/** 客户版显示名：名称开头若是型号就剥掉（与后端 export_data 同规则 ✓，2026-10-05）。
+ *  否则"屏幕与打印不一致"又会回来 ✗。 */
+function displayName(it: { name?: string | null; model?: string | null }): string {
+  const n = String(it.name ?? '').trim()
+  const m = String(it.model ?? '').trim()
+  if (!n || !m || n === m) return n
+  for (const sep of [' ', '　', '-', '_']) {
+    if (n.startsWith(m + sep)) return n.slice((m + sep).length).trim() || n
+  }
+  if (n.startsWith(m)) return n.slice(m.length).trim() || n
+  return n
+}
+
 function rowUnitPrice(it: QuoteItem): number {
   return toNum(it.unit_price) + toNum(it.install_unit_price)
 }
@@ -492,7 +505,7 @@ function back(): void {
               <tr v-for="(it, ii) in g.items" :key="it.id">
                 <td class="c">{{ ii + 1 }}</td>
                 <td>
-                <span v-if="it.parent_item_id" class="text-muted">　　└ </span>{{ it.name }}
+                <span v-if="it.parent_item_id" class="text-muted">　　└ </span>{{ displayName(it) }}
               </td>
                 <td v-if="showBrandModel">{{ it.brand || '—' }}</td>
                 <td v-if="showBrandModel">{{ it.model || '—' }}</td>
