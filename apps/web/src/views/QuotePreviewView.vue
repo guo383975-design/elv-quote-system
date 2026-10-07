@@ -84,13 +84,12 @@ function measurePagination(): void {
   const sheet = sheetRef.value
   if (!sheet) return
   const pageH = pageContentHeight()
-  const total = sheet.scrollHeight
-  pageCount.value = Math.max(1, Math.ceil((total - 2) / pageH))
 
   // 50% 规则 ✓：这块在它所在页的剩余空间不足半页 → 整块下移到下一页 ✓
   const bottom = bottomRef.value
   if (!bottom) {
     breakBeforeFees.value = false
+    pageCount.value = Math.max(1, Math.ceil((sheet.scrollHeight - 2) / pageH))
     return
   }
   const topInSheet = bottom.offsetTop - sheet.offsetTop - parseFloat(
@@ -103,9 +102,16 @@ function measurePagination(): void {
   breakBeforeFees.value = shouldBreak
   // 屏幕上留出与打印一致的空白 ✓ —— 让"屏幕看到的"与"打印出来的"分页相同 ✓
   breakGap.value = shouldBreak ? remain : 0
-  // 分页变化会改变总高 → 页数要重算 ✓
+  // 页数必须**扣掉**为对齐预览而加的空白 ✓（2026-10-05 修正 ✓）：
+  //   上一版直接用 sheet.scrollHeight ✗ → 把那段空白也算成内容 ✓ → 多报一页 ✓
+  //   而打印时这段空白是 0 ✓（由真正的分页替代 ✓）→ 屏幕就比打印多一页 ✓✗
+  const countBy = () => {
+    const gap = breakGap.value || 0
+    return Math.max(1, Math.ceil((sheet.scrollHeight - gap - 2) / pageH))
+  }
+  pageCount.value = countBy()
   nextTick(() => {
-    pageCount.value = Math.max(1, Math.ceil((sheet.scrollHeight - 2) / pageH))
+    pageCount.value = countBy()
   })
 }
 const showBrandModel = ref(true)
