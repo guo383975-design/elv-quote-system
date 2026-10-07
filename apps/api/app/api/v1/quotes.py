@@ -689,7 +689,10 @@ async def update_quote(
                     body=(
                         f"含税合计 {quote.total_with_tax}；提交人 {user.username}"
                     ),
-                    link=f"/quotes/{quote.id}",
+                    # 通知链接必须指向**真实存在的路由**（2026-10-05 用户反馈 404 ✓）：
+                    #   应用里没有 /quotes/:id ✗，正确路由是
+                    #   /projects/:projectId/workbench/:quoteId ✓
+                    link=f"/projects/{quote.project_id}/workbench/{quote.id}",
                 )
         elif target_status in (str(QuoteStatus.APPROVED), str(QuoteStatus.REJECTED)):
             # 用显式查询取 owner：`quote.project` 是懒加载关系，
@@ -714,7 +717,10 @@ async def update_quote(
                 kind=kind,
                 title=f"报价单{verb}：{quote.code}",
                 body=f"{quote.title}；操作人 {user.username}",
-                link=f"/quotes/{quote.id}",
+                # 通知链接必须指向**真实存在的路由**（2026-10-05 用户反馈 404 ✓）：
+                    #   应用里没有 /quotes/:id ✗，正确路由是
+                    #   /projects/:projectId/workbench/:quoteId ✓
+                    link=f"/projects/{quote.project_id}/workbench/{quote.id}",
             )
 
     # 改内容（不只是改状态）时：① 锁定的单据必须拒绝；② 必须有 update 权限
@@ -1120,7 +1126,10 @@ async def decide_approval(
                 else f"报价单已批准：{quote.code}"
             ),
             body=(comment or "") + f"（{user.username}）",
-            link=f"/quotes/{quote.id}",
+            # 通知链接必须指向**真实存在的路由**（2026-10-05 用户反馈 404 ✓）：
+                    #   应用里没有 /quotes/:id ✗，正确路由是
+                    #   /projects/:projectId/workbench/:quoteId ✓
+                    link=f"/projects/{quote.project_id}/workbench/{quote.id}",
         )
 
     records = await all_approvals(db, quote.id)
