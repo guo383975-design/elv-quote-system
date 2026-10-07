@@ -468,8 +468,13 @@ def _export_settings(
 
     # 取值优先级：**单据级覆盖 → 系统设置 → 模块常量**（2026-10-05）
     overrides = settings_overrides or {}
+    # ⚠️ 2026-10-08 修 bug：新版「每单条款覆盖」terms_override.valid_days **没被算进来** ✗
+    #   后果：条款文本按 7 天渲染 ✓ 而「有效期至」按系统默认 30 天算 ✗（同一份文件自相矛盾 ✗），
+    #   预览页、导出 PDF、export-clauses 接口**全中招** ✗。
+    #   优先级与前端取值链、与 build_variables 一致：本单条款 → 旧字段 → 系统设置 → 常量 ✓。
     valid_days = int(
-        overrides.get("valid_days")
+        (overrides.get("terms_override") or {}).get("valid_days")
+        or overrides.get("valid_days")
         or quote.get("valid_days")
         or QUOTE_VALID_DAYS
     )

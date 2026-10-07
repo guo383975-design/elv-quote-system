@@ -643,3 +643,40 @@ def test_env_font_wins_then_falls_through(monkeypatch):
 )
 def test_parse_font_spec(spec, expected):
     assert export_pdf.parse_font_spec(spec) == expected
+
+
+def test_export_settings_valid_days_precedence() -> None:
+    """有效期的取值链 + 一致性（2026-10-08 修 bug 的回归测试）。
+
+    bug 现象：条款**文本**按每单覆盖渲染 ✓，但「有效期至」用的是系统默认 ✗
+    → 同一份发给客户的文件里自相矛盾（写「报价有效期 7 天」却算 30 天）✗。
+    真因：_export_settings 算 valid_days 时只看了旧字段 valid_days_override ✗，
+    没看新版 terms_override.valid_days ✗（预览页/导出 PDF/export-clauses 都取自它）。
+    所以这条测试**同时**钉住"数字"和"条款文本里的天数" ✓ —— 只钉一个仍会漏 ✗。
+    """
+    from app.services.export_data import _export_settings
+
+    settings = {"quote": {"valid_days": 30, "clauses": None}}
+
+    # ① 每单条款覆盖优先（本次修的正是这条）
+    out = _export_settings(settings, {"terms_override": {"valid_days": 7}})
+    assert out["valid_days"] == 7, out["valid_days"]
+    assert any("7 天" in c for c in out["clauses"]), out["clauses"]
+    assert out["terms_overridden"] is True
+
+    # ② 旧字段仍兼容（老调用方/老数据）
+    out2 = _export_settings(settings, {"valid_days": 15})
+    assert out2["valid_days"] == 15, out2["valid_days"]
+    assert any("15 天" in c for c in out2["clauses"]), out2["clauses"]
+
+    # ③ 两者都有 → 每单条款（新版）优先于旧字段
+    out3 = _export_settings(settings, {"valid_days": 15, "terms_override": {"valid_days": 7}})
+    assert out3["valid_days"] == 7, out3["valid_days"]
+
+    # ④ 都没有 → 系统设置
+    out4 = _export_settings({"quote": {"valid_days": 45}}, None)
+    assert out4["valid_days"] == 45, out4["valid_days"]
+
+    # ⑤ 全空 → 模块常量（30）
+    out5 = _export_settings(None, None)
+    assert out5["valid_days"] == 30, out5["valid_days"]
