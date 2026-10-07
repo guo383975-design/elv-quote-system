@@ -493,6 +493,148 @@ function isFloorError(e: unknown): boolean {
   return msg.includes('底价')
 }
 
+// ==================== 附件配单（2026-10-05 用户反馈 ✓）====================
+// 买防火墙/交换机常要带授权/配件 ✓，以前加设备**没有任何提示** ✗。
+// 数据与判断都在后端（GET /quotes/{id}/accessory-check ✓），前端只负责问与落库 ✓。
+const accPickVisible = ref(false)
+const accLoading = ref(false)
+const accMissing = ref<
+  Array<{
+    item_id: string
+    item_name: string
+    quantity: string | number
+    group_label: string
+    is_required: boolean
+    select_mode: 'one' | 'many'
+    quantity_mode: 'per_unit' | 'fixed'
+    default_quantity: string | number
+    options: Array<{
+      accessory_id: string
+      code: string
+      name: string
+      brand?: string | null
+      model?: string | null
+      unit?: string | null
+      reference_price?: string | number | null
+      is_default?: boolean
+    }>
+  }>
+>([])
+/** 勾选状态：key = 明细行id + '|' + 组名 → 选中的 accessory_id 列表 ✓ */
+const accChosen = ref<Record<string, string[]>>({})
+/** 每行的数量（默认取主机行数量 × 组默认数量 ✓） */
+const accQty = ref<Record<string, number>>({})
+
+function accKey(itemId: string, groupLabel: string): string {
+  return `${itemId}|${groupLabel}`
+}
+
+function accIsChosen(itemId: string, groupLabel: string, accessoryId: string): boolean {
+  return (accChosen.value[accKey(itemId, groupLabel)] ?? []).includes(accessoryId)
+}
+
+function accToggle(
+  m: { item_id: string; group_label: string; select_mode: 'one' | 'many' },
+  accessoryId: string,
+): void {
+  const k = accKey(m.item_id, m.group_label)
+  const cur = accChosen.value[k] ?? []
+  if (m.select_mode === 'one') {
+    accChosen.value = { ...accChosen.value, [k]: cur.includes(accessoryId) ? [] : [accessoryId] }
+    return
+  }
+  accChosen.value = {
+    ...accChosen.value,
+    [k]: cur.includes(accessoryId) ? cur.filter((x) => x !== accessoryId) : [...cur, accessoryId],
+  }
+}
+
+/** 拉一次配单检查 ✓（缺附件就弹窗 ✓；不缺就静默 ✓） */
+async function openAccessoryPicker(force = false): Promise<void> {
+  if (!quoteId.value) return
+  accLoading.value = true
+  try {
+    const res = await quoteApi.accessoryCheck(quoteId.value)
+    const missing = (res?.missing ?? []) as typeof accMissing.value
+    if (!missing.length) {
+      if (force) ElMessage.success('配单检查通过：没有缺附件的主机 ✓')
+      return
+    }
+    accMissing.value = missing
+    // 预选：后端给的 chosen ✓ + 组里 is_default 的 ✓
+    const chosen: Record<string, string[]> = {}
+    const qty: Record<string, number> = {}
+    for (const m of missing) {
+      const k = accKey(m.item_id, m.group_label)
+      const presets = m.options.filter((o) => o.is_default).map((o) => o.accessory_id)
+      chosen[k] = presets.slice(0, m.select_mode === 'one' ? 1 : presets.length)
+      const per = Number(m.default_quantity ?? 1)
+      qty[k] = m.quantity_mode === 'per_unit'
+        ? Math.max(1, Math.round(Number(m.quantity ?? 1) * (per || 1)))
+        : Math.max(1, Math.round(per || 1))
+    }
+    accChosen.value = chosen
+    accQty.value = qty
+    accPickVisible.value = true
+    if (force) ElMessage.info(`有 ${missing.length} 处需要配附件 ✓`)
+  } catch (e) {
+    if (force) ElMessage.error(extractErrorMessage(e))
+  } finally {
+    accLoading.value = false
+  }
+}
+
+/** 确认配单：把选中的附件作为**子行**挂到主机行下 ✓ */
+async function confirmAccessories(): Promise<void> {
+  if (!quoteId.value) return
+  accLoading.value = true
+  let added = 0
+  try {
+    for (const m of accMissing.value) {
+      const k = accKey(m.item_id, m.group_label)
+      const picked = accChosen.value[k] ?? []
+      if (!picked.length) {
+        if (m.is_required) {
+          ElMessage.warning(`「${m.group_label}」是必选，请为 ${m.item_name} 选一个 ✓`)
+          return
+        }
+        continue
+      }
+      for (const id of picked) {
+        const opt = m.options.find((o) => o.accessory_id === id)
+        if (!opt) continue
+        await quoteApi.addItem(quoteId.value, {
+          // ★ 必须写 device_id ✓（2026-10-05 实测）：后端的"配单检查"是按**设备 id**
+          //   判断某个附件"已选" ✓ —— 只写名字/型号的话加完仍报"缺附件" ✗。
+          //   候选里的 accessory_id 就是库里那台附件设备的 id ✓。
+          device_id: opt.accessory_id,
+          name: opt.name,
+          brand: opt.brand ?? '',
+          model: opt.model ?? '',
+          unit: opt.unit || '套',
+          quantity: accQty.value[k] ?? 1,
+          unit_price: Number(opt.reference_price ?? 0),
+          install_unit_price: 0,
+          notes: `附件：${m.group_label}（主机 ${m.item_name}）`,
+          parent_item_id: m.item_id,       // ★ 作为主机行的子行 ✓（树形一致 ✓）
+        } as never)
+        added += 1
+      }
+    }
+    accPickVisible.value = false
+    if (added) {
+      ElMessage.success(`已加入 ${added} 行附件 ✓`)
+      await saveAndCompute()
+    } else {
+      ElMessage.info('没有勾选附件 ✓')
+    }
+  } catch (e) {
+    ElMessage.error(extractErrorMessage(e))
+  } finally {
+    accLoading.value = false
+  }
+}
+
 async function onPick(payload: { devices: Device[]; subsystemId: string | null }): Promise<void> {
   let added = 0
   let failed = 0
@@ -517,6 +659,8 @@ async function onPick(payload: { devices: Device[]; subsystemId: string | null }
   if (added) ElMessage.success(`已加入 ${added} 行`)
   if (failed) ElMessage.warning(`${failed} 行加入失败（可能已停产或数据不完整）`)
   await reload()
+  // 加完立刻查"缺不缺附件" ✓（用户反馈：买防火墙要带授权，以前毫无提示 ✗）
+  void openAccessoryPicker()
 }
 
 /** 原型第 2 页第三个页签：手动录入的设备 / 材料，直接作为一行加入本报价单。 */
@@ -688,7 +832,11 @@ async function loadClauses(): Promise<void> {
   try {
     const d = await quoteApi.exportClauses(quoteId.value)
     clausesData.value = d as never
-    clausesDraft.value = [...(d.clauses ?? [])]
+    // ⚠ 用 **clause_template（原始模板 ✓）** 而不是 clauses（渲染后的文字 ✗）：
+    //   · 渲染后的文字里 {valid_days} 已被换成 30 ✓ → 与标准条款标签永远比不相等 ✗
+    //     （用户看到的现象就是"点了标签没反应" ✓）
+    //   · 更关键：保存时会把变量**固化**成死数字 ✗ → 以后改数字条款不跟着变 ✗
+    clausesDraft.value = [...(d.clause_template ?? d.clauses ?? [])]
     validDaysDraft.value = d.valid_days ?? 30
     useOwnClauses.value = !!(d.clauses_overridden || d.valid_days_overridden)
     // 每单数字：用**生效值**回填 ✓（本单覆盖过就是本单值 ✓，否则是系统设置值 ✓）
@@ -751,10 +899,17 @@ function hasStandard(text: string): boolean {
 
 /** 勾选/取消一条标准条款 ✓（勾上=追加到本单 ✓；取消=从本单移除 ✓） */
 function toggleStandard(text: string): void {
-  if (hasStandard(text)) {
+  const on = hasStandard(text)
+  if (on) {
     clausesDraft.value = clausesDraft.value.filter((c) => c.trim() !== text.trim())
+    ElMessage.info('已从本单移除该条款 ✓')
   } else {
     clausesDraft.value = [...clausesDraft.value, text]
+    // 点了必须**看得见效果** ✓（2026-10-05）：
+    //   以前点完还在"继承系统设置"模式 ✓，界面上什么也不变 ✗ → 用户以为点不动 ✓。
+    //   现在自动切到"本单自选条款" ✓，并明确提示 ✓。
+    if (!useOwnClauses.value) useOwnClauses.value = true
+    ElMessage.success('已加入本单条款 ✓（记得点下方「保存条款设置」✓）')
   }
 }
 
@@ -1067,6 +1222,14 @@ async function confirmBatch(): Promise<void> {
   await saveAndCompute()
 }
 
+
+/** 滚到「报价说明条款」卡片（2026-10-05）✓
+ *  它原先只出现在页面最下方 ✓（明细表 → 版本快照 → 才轮到它 ✗），
+ *  用户找不到 ✓ → 加一个直达入口 ✓。 */
+function gotoClauses(): void {
+  const el = document.getElementById('quote-clauses')
+  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
 </script>
 
 <template>
@@ -1093,15 +1256,24 @@ async function confirmBatch(): Promise<void> {
       </div>
       <div class="wi-actions no-print">
         <!-- 状态机：原型没有，但审批链是新需求，保留 -->
+            <!-- 提交审核（2026-10-05 用户反馈 ✓）：原先藏在下拉里 ✗，现提成直接按钮 ✓，
+                 用与「从设备库添加」同款样式 type=primary（蓝色 ✓）✓ -->
+            <el-button
+              v-if="canSubmit"
+              type="primary"
+              size="small"
+              :disabled="!canEdit || statusChanging"
+              :loading="statusChanging"
+              @click="changeStatus('submitted', quoteStatus === 'rejected' ? '重新提交' : '提交审核', '提交后进入待审批状态，确认提交？')"
+            >
+              {{ quoteStatus === 'rejected' ? '重新提交审核' : '提交审核' }}
+            </el-button>
         <el-dropdown v-if="canSubmit || canStartReview || (canApprove && locked)" @command="onStatusCommand">
           <el-button size="small" :loading="statusChanging">
             状态操作<el-icon class="el-icon--right"><ArrowDown /></el-icon>
           </el-button>
           <template #dropdown>
             <el-dropdown-menu>
-              <el-dropdown-item v-if="canSubmit" command="submitted">
-                {{ quoteStatus === 'rejected' ? '重新提交' : '提交审核' }}
-              </el-dropdown-item>
               <el-dropdown-item v-if="canStartReview" command="reviewing">开始审核（接手）</el-dropdown-item>
               <el-dropdown-item v-if="canApprove && locked" command="draft">退回草稿（解除锁定）</el-dropdown-item>
             </el-dropdown-menu>
@@ -1180,6 +1352,12 @@ async function confirmBatch(): Promise<void> {
       <span class="text-muted toolbar-stat">
         共 {{ stats.subsystems }} 个子系统 · {{ stats.items }} 项设备 · {{ stats.points }} 个点位
       </span>
+          <el-button :loading="accLoading" @click="openAccessoryPicker(true)">
+            <el-icon><Paperclip /></el-icon>&nbsp;配单检查
+          </el-button>
+          <el-button type="primary" plain @click="gotoClauses">
+            <el-icon><Document /></el-icon>&nbsp;报价条款
+          </el-button>
           <el-button type="primary" :loading="aiSuggesting" @click="runAiSuggest">
             <el-icon><MagicStick /></el-icon>&nbsp;AI 预套定额
           </el-button>
@@ -1618,6 +1796,46 @@ async function confirmBatch(): Promise<void> {
       @pick="onPick"
       @manual="onManualAdd"
     />
+
+        <!-- 附件配单弹窗（2026-10-05 ✓）：只问"缺的那些" ✓，数据来自后端配单检查 ✓ -->
+        <el-dialog v-model="accPickVisible" title="选择附件（主机下单常带授权/配件）" width="760px">
+          <div v-if="!accMissing.length" class="text-muted">没有需要配的附件 ✓</div>
+          <div v-for="(m, mi) in accMissing" :key="mi" class="acc-block">
+            <div class="acc-head">
+              <b>{{ m.item_name }}</b>
+              <span class="text-muted">（主机数量 {{ m.quantity }}）</span>
+              <el-tag v-if="m.is_required" type="danger" size="small" effect="plain">必选</el-tag>
+              <span class="text-muted">{{ m.group_label }}</span>
+            </div>
+            <div>
+              <el-checkbox
+                v-for="o in m.options"
+                :key="o.accessory_id"
+                :model-value="accIsChosen(m.item_id, m.group_label, o.accessory_id)"
+                @change="accToggle(m, o.accessory_id)"
+              >
+                {{ o.name }}
+                <span class="text-muted">（{{ o.model || o.code }} · 参考价 {{ o.reference_price ?? '—' }}）</span>
+              </el-checkbox>
+            </div>
+            <div style="margin-top: 6px">
+              数量：
+              <el-input-number
+                v-model="accQty[accKey(m.item_id, m.group_label)]"
+                :min="1"
+                :precision="0"
+                size="small"
+              />
+              <span class="text-muted" style="margin-left: 8px">默认按主机数量算 ✓，可改 ✓</span>
+            </div>
+          </div>
+          <template #footer>
+            <el-button @click="accPickVisible = false">稍后再说</el-button>
+            <el-button type="primary" :loading="accLoading" @click="confirmAccessories">
+              确认加入附件
+            </el-button>
+          </template>
+        </el-dialog>
     <ApplyPointTemplateDialog
       v-model="applyTemplateVisible"
       :quote-id="quoteId"
@@ -1802,7 +2020,7 @@ async function confirmBatch(): Promise<void> {
 
             <div v-if="standardClauses.length" class="mb">
               <div class="text-muted" style="margin-bottom: 4px">
-                后台标准条款（点一下加入本单 ✓ / 再点移除 ✓）：
+                后台标准条款（**点一下即加入本单** ✓ / 再点移除 ✓；加入后会自动切到「本单自选条款」✓）：
               </div>
               <div>
                 <el-tag
@@ -1975,6 +2193,10 @@ async function confirmBatch(): Promise<void> {
   </template>
 
 <style scoped>
+.acc-block { border: 1px solid var(--el-border-color-lighter); border-radius: 6px;
+  padding: 8px 10px; margin-bottom: 10px; }
+.acc-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+
 .st-terms { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px 12px; }
 .st-term { display: flex; align-items: center; gap: 8px; font-size: 13px; }
 .st-term > span:first-child { width: 96px; color: var(--el-text-color-secondary); }
