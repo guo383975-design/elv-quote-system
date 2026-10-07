@@ -713,7 +713,7 @@ function back(): void {
         <!-- 抬头 -->
         <div class="doc-head">
           <div class="doc-company">
-            <div class="doc-brand">弱</div>
+            <div class="doc-brand">XX科技</div>
             <div>
               <div class="doc-company-name">{{ company.name }}</div>
               <div class="doc-company-meta">{{ companyLine }}</div>
@@ -865,7 +865,7 @@ function back(): void {
         <template v-if="pg.head">
           <div class="doc-head">
             <div class="doc-company">
-              <div class="doc-brand">弱</div>
+              <div class="doc-brand">XX科技</div>
               <div>
                 <div class="doc-company-name">{{ company.name }}</div>
                 <div class="doc-company-meta">{{ companyLine }}</div>
@@ -1141,11 +1141,15 @@ function back(): void {
 }
 
 .doc-brand {
-  width: 26px;
+  /* 2026-10-05 用户要求：品牌字由「弱」改为「XX科技」✓ → 方框改成能容两个字的圆角块 ✓ */
+  min-width: 42px;
   height: 26px;
+  padding: 0 7px;
   border-radius: 6px;
   background: #14243d;
   color: #fff;
+  font-size: 13px;
+  letter-spacing: 1px;
   font-weight: 700;
   display: flex;
   align-items: center;
