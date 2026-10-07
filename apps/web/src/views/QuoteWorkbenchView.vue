@@ -101,11 +101,13 @@ function ratePayload(): Record<string, unknown> {
     tax_rate: percentInputToRatio(rates.tax_rate_pct),
     fee_base: rates.fee_base,
     auxiliary_base: rates.auxiliary_base,
-    auxiliary_rate: percentInputToRatio(rates.auxiliary_rate_pct),
+    // auxiliary_rate 创建报价时确定、之后不可改 ✗（决策④ ✓）→ 不再发送
+    // auxiliary_rate: percentInputToRatio(rates.auxiliary_rate_pct),
     design_rate: percentInputToRatio(rates.design_rate_pct),
     warranty_rate: percentInputToRatio(rates.warranty_rate_pct),
     training_fee: rates.training_fee,
-    mgmt_profit_rate: percentInputToRatio(rates.mgmt_profit_rate_pct),
+    // mgmt_profit_rate 创建报价时确定、之后不可改 ✗（决策④ ✓）→ 不再发送
+    // mgmt_profit_rate: percentInputToRatio(rates.mgmt_profit_rate_pct),
     // 整体浮动 + 分类浮动（相加，见 AUDIT_REPORT §14）
     labor_float_rate: percentInputToRatio(rates.labor_float_rate_pct),
     labor_float_per_class: {
@@ -1677,7 +1679,7 @@ const clausesVisible = ref(false)
           <el-input-number
             v-model="rates.auxiliary_rate_pct"
             :min="0" :max="100" :precision="2" :controls="false" size="small"
-            class="fee-input" :disabled="!canEdit" @change="onRateChange"
+            class="fee-input" :disabled="true" @change="onRateChange"
           />%
         </div>
         <div class="fee-value num">{{ money(quote?.auxiliary_total) }}</div>
@@ -1721,7 +1723,7 @@ const clausesVisible = ref(false)
           <el-input-number
             v-model="rates.mgmt_profit_rate_pct"
             :min="0" :max="100" :precision="2" :controls="false" size="small"
-            class="fee-input" :disabled="!canEdit" @change="onRateChange"
+            class="fee-input" :disabled="true" @change="onRateChange"
           />%
         </div>
         <div class="fee-value num">{{ money(quote?.mgmt_profit) }}</div>

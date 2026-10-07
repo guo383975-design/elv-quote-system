@@ -377,6 +377,15 @@ async def create_quote(
     # 强迫调用方先编出一个编号是没必要的门槛（以前这里是必填，导致 422，
     # 于是「编制报价」这个入口根本走不通）。
     data = body.model_dump()
+    # 创建时把「系统设置 → 报价策略」里的费率落到本单（2026-10-05 用户决策④ ✓）：
+    #   auxiliary_rate（辅材）/ mgmt_profit_rate（管理费+毛利）属于
+    #   **创建报价时确定、之后不可改**的那一类 ✓。
+    #   以前这里直接用模型里写死的默认值 ✗ → 系统设置改了不生效 ✓。
+    #   调用方显式传了值就以调用方为准 ✓（将来创建界面可覆盖 ✓）。
+    _qs = (await load_settings(db) or {}).get("quote") or {}
+    for _field in ("auxiliary_rate", "mgmt_profit_rate", "tax_rate", "labor_float_rate"):
+        if data.get(_field) is None and _qs.get(_field) is not None:
+            data[_field] = _qs[_field]
     code = (data.get("code") or "").strip()
     if not code:
         # 同项目下已存在的报价单数量 + 1 → 编号后缀，冲突时继续往后找一个空位
@@ -725,7 +734,21 @@ async def update_quote(
         if data.get(_json_key) is not None:
             data[_json_key] = _normalize_jsonable(data[_json_key])
 
-    # 条款/策略改动留痕（2026-10-05 ✓）：用户要求"改好的条款在保存报价单时有记录" ✓
+    # 创建后不可改的策略项（2026-10-05 用户决策④ ✓）：
+    #   辅材率 / 管理费+毛利率 属于"建单时定死"的口径 ✓ —— 随手能改，
+    #   等于所有历史单的算法都能被悄悄改掉 ✗。
+    #   只开放 4 项：计税方式 / 税率 / 人工浮动 / 有效期 ✓。
+    _locked = {"auxiliary_rate": "辅材费率", "mgmt_profit_rate": "管理费+毛利率"}
+    _touched = sorted(k for k in _locked if k in data)
+    if _touched:
+        raise HTTPException(
+            status_code=422,
+            detail="以下策略项在创建报价时确定、之后不可修改："
+            + "、".join(_locked[k] for k in _touched)
+            + "（如需调整，请新建报价单 ✓）",
+        )
+
+    # 条款/策略改动留痕（2026-10-05 ✓）：用户要求"改好的报价条款在保存时有记录" ✓
     #   记**改了哪些字段** + 条款全文与每单数字的快照 ✓（金额类字段也一并记 ✓）。
     _tracked = (
         "clauses_override", "terms_override", "valid_days_override",

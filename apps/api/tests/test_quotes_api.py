@@ -357,14 +357,36 @@ async def test_patch_quote_rate_triggers_recompute(
     )
     before = await _detail(client, admin_headers, q["id"])
 
+    # ① 创建时就能定辅材率（2026-10-05 决策④ ✓：这两项"创建时确定、之后不可改" ✓）
+    #    —— 原用例是 PATCH 改辅材率并断言 680×12% ✓；
+    #       现在改成"创建时传 12%" ✓，口径断言原样保留 ✓。
+    r = await client.post(
+        "/api/v1/quotes",
+        headers=admin_headers,
+        json={"project_id": str(p.id), "name": "辅材率创建验证", "auxiliary_rate": "0.12"},
+    )
+    assert r.status_code in (200, 201), r.text
+    q_created = r.json()
+    await client.post(
+        f"/api/v1/quotes/{q_created['id']}/items",
+        headers=admin_headers,
+        json={"device_id": str(devices[0].id), "name": devices[0].name,
+              "quantity": "1", "unit_price": "680"},
+    )
+    created = await _detail(client, admin_headers, q_created["id"])
+    assert dec(created["auxiliary_total"]) == Decimal("81.60"), (
+        f"创建时传的辅材率应生效：680 × 12% = 81.60，实际 {created['auxiliary_total']}"
+    )
+
+    # ② 允许的字段（税率）改了要重算 ✓ —— 原用例的"改费率会重算"意图保留 ✓
+    before = await _detail(client, admin_headers, q["id"])
     r = await client.patch(
-        f"/api/v1/quotes/{q['id']}", headers=admin_headers, json={"auxiliary_rate": "0.12"}
+        f"/api/v1/quotes/{q['id']}", headers=admin_headers, json={"tax_rate": "0.12"}
     )
     assert r.status_code == 200
     after = await _detail(client, admin_headers, q["id"])
 
-    assert dec(before["auxiliary_total"]) == Decimal("40.80")   # 680 × 6%
-    assert dec(after["auxiliary_total"]) == Decimal("81.60")    # 680 × 12%
+    assert dec(before["auxiliary_total"]) == Decimal("40.80")   # 680 × 6%（默认辅材率 ✓ 未变 ✓）
     assert float(after["total_with_tax"]) > float(before["total_with_tax"])
 
 
@@ -382,7 +404,7 @@ async def test_optimistic_lock_rejects_stale_version(
 
     # 甲先改了一次 → 版本前进
     r = await client.patch(
-        f"/api/v1/quotes/{q['id']}", headers=admin_headers, json={"auxiliary_rate": "0.11"}
+        f"/api/v1/quotes/{q['id']}", headers=admin_headers, json={"tax_rate": "0.11"}
     )
     assert r.status_code == 200, r.text
     assert r.json()["version"] == stale + 1
@@ -391,18 +413,18 @@ async def test_optimistic_lock_rejects_stale_version(
     r = await client.patch(
         f"/api/v1/quotes/{q['id']}",
         headers=admin_headers,
-        json={"version": stale, "auxiliary_rate": "0.99"},
+        json={"version": stale, "tax_rate": "0.99"},
     )
     assert r.status_code == 409, r.text
     assert "已被他人修改" in r.json()["detail"]
     after = await _detail(client, admin_headers, q["id"])
-    assert dec(after["auxiliary_rate"]) == Decimal("0.11")
+    assert dec(after["tax_rate"]) == Decimal("0.11")
 
     # 乙刷新拿到最新版本后再提交 → 放行
     r = await client.patch(
         f"/api/v1/quotes/{q['id']}",
         headers=admin_headers,
-        json={"version": stale + 1, "auxiliary_rate": "0.12"},
+        json={"version": stale + 1, "tax_rate": "0.12"},
     )
     assert r.status_code == 200, r.text
     assert r.json()["version"] == stale + 2
@@ -1978,3 +2000,30 @@ async def test_notifications_are_per_user_and_markable(
     allrows = (await client.get("/api/v1/notifications",
                                 params={"unread_only": False}, headers=mh)).json()
     assert any(n["id"] == nid for n in allrows["items"]), allrows
+
+async def test_strategy_rates_locked_after_creation(client, db, admin_headers):
+    """辅材率 / 管理费率：创建报价时确定，之后不可改 ✗（2026-10-05 用户决策④ ✓）。
+
+    只开放 4 项：计税方式 / 税率 / 人工浮动 / 有效期 ✓。
+    """
+    p = await _make_project(db)
+    q = await _make_quote(client, admin_headers, p.id)
+    qid = q["id"]
+
+    # ① 被锁的两项：422，且提示里说清"创建时确定"
+    for field in ("auxiliary_rate", "mgmt_profit_rate"):
+        r = await client.patch(f"/api/v1/quotes/{qid}", headers=admin_headers, json={field: "0.07"})
+        assert r.status_code == 422, f"{field} 应被锁 422，实际 {r.status_code}"
+        assert "不可修改" in r.text, r.text
+
+    # ② 允许的四项：200 且真的生效
+    r = await client.patch(
+        f"/api/v1/quotes/{qid}", headers=admin_headers,
+        json={"tax_rate": "0.06", "labor_float_rate": "0.10",
+              "tax_method": "general_9pct", "valid_days_override": 45},
+    )
+    assert r.status_code == 200, r.text
+    got = (await client.get(f"/api/v1/quotes/{qid}", headers=admin_headers)).json()
+    assert abs(float(got["tax_rate"]) - 0.06) < 1e-9, got
+    assert abs(float(got["labor_float_rate"]) - 0.10) < 1e-9, got
+    assert got["valid_days_override"] == 45, got
