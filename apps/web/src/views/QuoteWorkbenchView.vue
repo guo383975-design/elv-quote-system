@@ -188,10 +188,6 @@ function onStatusCommand(cmd: string): void {
 
 // ----- 数据加载 -----
 async function reload(): Promise<void> {
-  // 切换模式期间不许被并发 reload 覆盖 ✗（见 onModeChange 的说明 ✓）
-  if (!modeSaving) {
-    installMode.value = String((quote.value as { install_mode?: string } | null)?.install_mode ?? 'manual')
-  }
   void loadQuotaInfo()
   loading.value = true
   try {
@@ -203,6 +199,14 @@ async function reload(): Promise<void> {
     ])
     project.value = p
     quote.value = q
+    // 报价模式对齐（2026-10-07 修正 ✓）：必须在本单数据 q **拿到之后**再读 install_mode ✓，
+    //   旧写法在本函数开头读 quote.value ✗ —— 那时它还是**上一张单/空值** ✗，
+    //   首屏必然落到 'manual' 兜底 ✗ → 定额单被显示成「手工人工费模式」✗
+    //   （连带 AI 预套定额按钮、定额列也被误藏 ✗）。
+    //   切换模式期间仍不许被并发 reload 覆盖 ✓（见 onModeChange 的说明 ✓）。
+    if (!modeSaving) {
+      installMode.value = String((q as { install_mode?: string } | null)?.install_mode ?? 'manual')
+    }
     subsystems.value = s
     summary.value = sum
     syncRatesFromQuote(q)
@@ -1110,6 +1114,11 @@ async function onModeChange(v: string): Promise<void> {
   }
 }
 
+// 2026-10-07：界面上的模式选择控件已按用户要求换成**只读彩色标识** ✓，
+//   本函数因此暂无模板调用方 ✗ —— 但**不删除、不改动** ✓（后端已 422 ✗，逻辑留作历史/后续备用）。
+//   为满足 tsconfig 的 noUnusedLocals ✓，这里保留一次显式引用（不影响运行 ✓）。
+void onModeChange
+
 // ==================== 广联达式树形明细（2026-10-05 阶段1）====================
 // 主设备行 = 有设备费的普通行 ✓；定额子目行 = parent_item_id 指向主设备 ✓
 //   · 子目的 money 走**既有** install_unit_price（= 定额基价）✓ → 后端零改动 ✓
@@ -1366,19 +1375,20 @@ const clausesVisible = ref(false)
           <el-button v-if="aiPickedCount" @click="confirmBatch">
             批量直接确认（{{ aiPickedCount }}）
           </el-button>
-      <el-select
-        v-model="installMode"
-        size="small"
-        style="width: 190px"
-        @change="onModeChange"
-       disabled
-                    title="报价模式在建单时确定，之后不可切换（如需更换请新建报价单）">
-        <el-option label="手动填安装单价" value="manual" />
-        <!-- 定额模式（2026-10-05 复核后重新开放 ✓）：
-             实测**不存在重复计** ✓ —— 之前看到的「定额人工费」是未回填保护的**镜像显示** ✗，
-             已在后端定额模式下关掉该镜像 ✓ -->
-          <el-option label="套定额（基价自动填进安装单价）" value="quota" />
-      </el-select>
+      <!-- 报价模式：只读彩色标识（2026-10-05 用户要求 ✓）
+           模式在建单时确定、之后不可切换（后端对 PATCH 直接 422 ✗），
+           所以原来的下拉控件已经**没有选择意义** ✗ → 改成彩色只读标识用于提醒 ✓。
+           注：installMode 变量与加载逻辑保留 ✓（AI 预套定额 v-if、安装单价列禁用判断等仍在用）。 -->
+      <el-tooltip content="报价模式在建单时确定，之后不可切换；如需更换请新建报价单" placement="bottom">
+        <span class="mode-badge-wrap">
+          <el-tag v-if="installMode === 'quota'" class="mode-badge" type="warning" effect="dark" size="large">
+            套定额模式
+          </el-tag>
+          <el-tag v-else class="mode-badge" type="success" effect="dark" size="large">
+            手工人工费模式
+          </el-tag>
+        </span>
+      </el-tooltip>
       <!-- 打印入口已取消（2026-10-05 用户要求 ✓）：打印统一在「客户版预览」里做 ✓ -->
     </div>
 
@@ -2310,6 +2320,18 @@ const clausesVisible = ref(false)
 .toolbar-stat {
   font-size: 12.5px;
   margin-right: 4px;
+}
+
+/* 报价模式只读彩色标识（提醒用 ✓） */
+.mode-badge-wrap {
+  display: inline-flex;
+  align-items: center;
+  cursor: help;
+}
+
+.mode-badge {
+  font-weight: 600;
+  letter-spacing: 0.5px;
 }
 
 /* ④ 两栏 */
