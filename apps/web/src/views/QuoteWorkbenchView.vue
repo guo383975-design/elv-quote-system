@@ -918,6 +918,22 @@ const taxMethodDraft = ref<string>('general_9pct')
 const taxRateDraft = ref<number>(9)
 const laborFloatDraft = ref<number>(0)
 
+/** 客户版预览（2026-10-05 用户反馈 ✓）：
+ *  把条款草稿里的 {变量} 换成本单当前填的数字 ✓ —— 用户要的是"所见即所得" ✓，
+ *  不用再对着 {valid_days} 这种变量原文猜它会变成什么 ✓。
+ *  整数不带 .0（50% 而不是 50.0% ✓，与后端 render_clauses 的格式一致 ✓）。 */
+const clausesPreview = computed(() =>
+  clausesDraft.value.map((c) =>
+    String(c).replace(/\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (whole, name: string) => {
+      const v = (termsDraft as unknown as Record<string, unknown>)[name]
+      if (v === undefined || v === null || v === '') return whole
+      const num = Number(v)
+      if (Number.isFinite(num)) return String(num)
+      return String(v)
+    }),
+  ),
+)
+
 async function saveClauses(): Promise<void> {
   if (!quoteId.value) return
   clausesSaving.value = true
@@ -1974,6 +1990,18 @@ const clausesVisible = ref(false)
           本单已自定义（不影响其它报价单）
         </div>
       </div>
+        
+          <div class="clauses-preview">
+            <div class="text-muted" style="margin-bottom: 4px">
+              预览 —— 这张单发给客户 / 打印出来就是下面这几句 ✓（数字已按上面填的替换 ✓）：
+            </div>
+            <ol style="margin: 0; padding-left: 20px">
+              <li v-for="(c, i) in clausesPreview" :key="i" style="margin-bottom: 4px">{{ c }}</li>
+            </ol>
+            <div v-if="!clausesPreview.length" class="text-muted">
+              还没有条款 ✓ —— 可在上方点标准条款标签加入 ✓，或选「继承系统设置条款」用默认 ✓。
+            </div>
+          </div>
         </div>
         <template #footer>
           <el-button @click="clausesVisible = false">取消</el-button>
@@ -2215,6 +2243,10 @@ const clausesVisible = ref(false)
   </template>
 
 <style scoped>
+/* 条款预览（2026-10-05）：浅底 + 左边条，一眼区分"编辑区"与"将会打印的样子" ✓ */
+.clauses-preview { margin-top: 12px; padding: 10px 12px; border-left: 3px solid var(--el-color-primary);
+  background: var(--el-fill-color-lighter); border-radius: 4px; font-size: 13px; }
+
 /* 报价条款弹窗（2026-10-05）：内容再长也不撑页面 ✓ */
 .clauses-dialog .el-dialog__body { padding-top: 8px; }
 
