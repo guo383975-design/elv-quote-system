@@ -62,7 +62,6 @@ const cost = ref<QuoteCost | null>(null)
 const deviceTotal = ref(0)
 const warnings = ref<string[]>([])
 const computing = ref(false)
-const exporting = ref(false)
 const ratesDirty = ref(false)
 
 /** 当前选中的子系统（null = 全部）—— 原型左栏点击切换右栏明细。 */
@@ -142,7 +141,6 @@ const locked = computed(() => ['approved', 'archived'].includes(quoteStatus.valu
 const canEdit = computed(() => auth.canWrite && !locked.value)
 const canApprove = computed(() => auth.can('quote', 'approve'))
 const canSeeAudit = computed(() => auth.can('audit_log', 'read'))
-const canExport = computed(() => auth.can('quote', 'export'))
 const waitingClaim = computed(() => quoteStatus.value === 'submitted')
 const inReview = computed(() => quoteStatus.value === 'reviewing')
 const canSubmit = computed(
@@ -972,28 +970,7 @@ async function saveClauses(): Promise<void> {
   }
 }
 
-// ----- 导出 / 打印 -----
-async function onExport(format: 'xlsx' | 'pdf', internal: boolean): Promise<void> {
-  exporting.value = true
-  try {
-    const { blob, filename } = await quoteApi.exportFile(quoteId.value, format, internal)
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = filename
-    a.click()
-    URL.revokeObjectURL(url)
-    ElMessage.success(internal ? `已导出内部版：${filename}` : `已导出：${filename}`)
-  } catch (e) {
-    ElMessage.error(extractErrorMessage(e))
-  } finally {
-    exporting.value = false
-  }
-}
-
-function onPrint(): void {
-  window.print()
-}
+// 导出 / 打印函数随入口一起取消（2026-10-05 ✓）：这些动作统一在「客户版预览」页做 ✓
 
 // ----- 留痕 -----
 async function openAudit(): Promise<void> {
@@ -1391,9 +1368,7 @@ const clausesVisible = ref(false)
              已在后端定额模式下关掉该镜像 ✓ -->
           <el-option label="套定额（基价自动填进安装单价）" value="quota" />
       </el-select>
-      <el-button class="no-print" @click="onPrint">
-        <el-icon><Printer /></el-icon>&nbsp;打印
-      </el-button>
+      <!-- 打印入口已取消（2026-10-05 用户要求 ✓）：打印统一在「客户版预览」里做 ✓ -->
     </div>
 
     <!-- ④ 两栏 + ⑤ 左栏下半 -->
@@ -1765,23 +1740,7 @@ const clausesVisible = ref(false)
         >
           保存并重算{{ ratesDirty ? ' *' : '' }}
         </el-button>
-        <el-dropdown v-if="canExport" @command="(c: string) => onExport(c.split(':')[0] as 'xlsx' | 'pdf', c.endsWith('internal'))">
-          <el-button :loading="exporting">
-            导出<el-icon class="el-icon--right"><ArrowDown /></el-icon>
-          </el-button>
-          <template #dropdown>
-            <el-dropdown-menu>
-              <el-dropdown-item command="xlsx:customer">客户版 Excel</el-dropdown-item>
-              <el-dropdown-item command="pdf:customer">客户版 PDF</el-dropdown-item>
-              <el-dropdown-item v-if="auth.canSeeCost" divided command="xlsx:internal">
-                内部版 Excel（含成本）
-              </el-dropdown-item>
-              <el-dropdown-item v-if="auth.canSeeCost" command="pdf:internal">
-                内部版 PDF（含成本）
-              </el-dropdown-item>
-            </el-dropdown-menu>
-          </template>
-        </el-dropdown>
+        <!-- 导出入口已取消（2026-10-05 ✓）：Excel/PDF 统一在「客户版预览」里导出 ✓ -->
       </div>
     </div>
 
