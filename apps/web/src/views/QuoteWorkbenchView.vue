@@ -2010,7 +2010,18 @@ function gotoClauses(): void {
         <template v-if="revDiff.header.length">
           
       <!-- 报价说明条款（2026-10-05）：客户版 PDF 与预览印的就是这些 -->
-      <div class="card" style="margin-top: 12px">
+
+<div class="mb" style="margin-top: 12px"><b>费率/口径改动</b></div>
+          <el-table :data="revDiff.header" border size="small">
+            <el-table-column prop="field" label="字段" width="200" />
+            <el-table-column prop="from" label="旧" />
+            <el-table-column prop="to" label="新" />
+          </el-table>
+        </template>
+      </template>
+    </el-drawer>
+
+      <div id="quote-clauses" class="card" style="margin-top: 12px">
         <div class="card-title">
           报价说明条款（客户版）
           <span class="text-muted">
@@ -2136,16 +2147,6 @@ function gotoClauses(): void {
           本单已自定义（不影响其它报价单）
         </div>
       </div>
-
-<div class="mb" style="margin-top: 12px"><b>费率/口径改动</b></div>
-          <el-table :data="revDiff.header" border size="small">
-            <el-table-column prop="field" label="字段" width="200" />
-            <el-table-column prop="from" label="旧" />
-            <el-table-column prop="to" label="新" />
-          </el-table>
-        </template>
-      </template>
-    </el-drawer>
 
     <!-- 分级审批（2026-10-04）：开启后"批准"要走完 N 级；这里显示进度与意见 -->
     <el-card
