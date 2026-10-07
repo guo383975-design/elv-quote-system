@@ -151,12 +151,15 @@ class ExportContext:
 
     @property
     def show_spec(self) -> bool:
-        """是否要出「设备参数」列：**有任何一行填了**才出。
+        """是否输出「设备参数」列。
 
-        为什么不无条件出：没有参数的单子（多数）会白白变宽 ——
-        实测会把明细表挤到下页，客户版 PDF 从 1 页变 2 页。
-        表头与单元格必须用同一个判断，否则列数对不上（渲染器会错位）。
+        **客户版一律不输出**（2026-10-05 用户要求 C ✓）：
+          A4 横向 14 列本就很紧 ✓，参数列一长就把「设备名称/品牌/型号/价格」
+          挤成竖排 ✓（实测：30% 上限允许它独吞 79mm ✗）→ 客户看着难受 ✓。
+          参数只在**内部版**（含成本的版本）保留 ✓ —— 那是给自己看的 ✓。
         """
+        if not self.include_cost:
+            return False
         return any((row.spec_text or "").strip() for row in self.items)
 
     @property

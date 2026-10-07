@@ -137,7 +137,21 @@ async def test_spec_column_only_when_present(
     assert len(plain.item_headers()) == len(plain.item_row_cells(plain.items[0])), \
         "表头与单元格列数必须一致"
 
-    withspec = ExportContext(meta=meta, items=[
+    # 客户版（include_cost=False）**永远不输出参数列** ——
+    # 2026-10-05 用户要求 C ✓：横向 14 列已很紧 ✓，参数列会把名称/品牌/型号/价格挤成竖排 ✗。
+    customer_with_spec = ExportContext(meta=meta, items=[
+        ExportItemRow(seq=1, subsystem="", name="设备", brand="", model="M",
+                      spec_text="吞吐 10Gbps", unit="台", quantity="1",
+                      unit_price="1", amount="1", source_label="", note=""),
+    ])
+    assert "设备参数" not in customer_with_spec.item_headers(), (
+        f"客户版不该出现设备参数列：{customer_with_spec.item_headers()}"
+    )
+
+    # 参数列只在**内部版**（含成本）里、且确实填了参数时才出现 ✓
+    from dataclasses import replace
+
+    withspec = ExportContext(meta=replace(meta, include_cost=True), items=[
         ExportItemRow(seq=1, subsystem="", name="设备", brand="", model="M",
                       spec_text="吞吐 10Gbps", unit="台", quantity="1",
                       unit_price="1", amount="1", source_label="", note=""),
