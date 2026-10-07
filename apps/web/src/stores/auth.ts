@@ -24,6 +24,16 @@ function readCachedUser(): User | null {
 
 export const useAuthStore = defineStore('auth', () => {
   const token = ref<string | null>(localStorage.getItem(TOKEN_KEY))
+// 是否必须先改口令（2026-10-05 ✓）：登录响应带过来 ✓，持久化以挺过刷新 ✓；
+// 真正的事实来源在后端数据库 ✓，这里只是"提示与阻断" ✓。
+const MUST_KEY = 'quote.mustChangePwd'
+const mustChangePassword = ref<boolean>(localStorage.getItem(MUST_KEY) === '1')
+
+function setMustChangePassword(v: boolean): void {
+  mustChangePassword.value = v
+  if (v) localStorage.setItem(MUST_KEY, '1')
+  else localStorage.removeItem(MUST_KEY)
+}
   const user = ref<User | null>(readCachedUser())
   const resources = ref<string[]>([])
   const actions = ref<Record<string, string[]>>({})
@@ -97,6 +107,7 @@ export const useAuthStore = defineStore('auth', () => {
   async function login(username: string, password: string): Promise<void> {
     const resp = await authApi.login(username, password)
     token.value = resp.access_token
+    setMustChangePassword(Boolean((resp as { must_change_password?: boolean }).must_change_password))
     persist()
     try {
       await loadMe()
@@ -135,6 +146,8 @@ export const useAuthStore = defineStore('auth', () => {
     isLoggedIn,
     role,
     displayName,
+    mustChangePassword,
+    setMustChangePassword,
     canSeeCost,
     canSeeProfit,
     canWrite,

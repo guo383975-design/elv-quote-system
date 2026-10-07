@@ -8,6 +8,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -120,10 +121,40 @@ async def _issue_token(db: AsyncSession, user: User) -> TokenResponse:
         },
     )
     return TokenResponse(
+        must_change_password=bool(getattr(user, "must_change_password", False)),
         access_token=token,
         token_type="bearer",
         expires_in=settings.jwt_expire_minutes * 60,
     )
+
+
+class ChangePasswordBody(BaseModel):
+    """改自己的口令（2026-10-05 ✓）。"""
+
+    old_password: str = Field(min_length=1, max_length=128)
+    new_password: str = Field(min_length=8, max_length=128)
+
+
+@router.post("/change-password", summary="修改自己的口令")
+async def change_password(
+    body: ChangePasswordBody,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> dict:
+    """校验旧口令 → 写新口令 → 清掉"必须改口令"标记 → 让其它会话失效 ✓。
+
+    为什么让其它会话失效 ✓：改口令的常见动机就是"怀疑泄露" ✓，
+    旧 token 还能用就没意义了 ✓（token_version+1 即可 ✓）。
+    """
+    if not await verify_password_async(body.old_password, user.hashed_password):
+        raise HTTPException(status_code=400, detail="原口令不正确")
+    if body.new_password == body.old_password:
+        raise HTTPException(status_code=400, detail="新口令不能与原口令相同")
+    user.hashed_password = await hash_password_async(body.new_password)
+    user.must_change_password = False
+    user.token_version = int(user.token_version or 0) + 1
+    await db.commit()
+    return {"ok": True, "must_change_password": False}
 
 
 @router.post(

@@ -50,6 +50,11 @@ class User(UUIDPKMixin, TimestampMixin, Base):
     is_superuser: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     # 会话版本：强制下线/改密码时 +1，已发出的令牌立即失效（H-8）
     token_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # 是否必须先改口令才能继续使用（2026-10-05 ✓）：
+    #   初始/重置口令（尤其 seed 出来的 admin）置 true ✓ → 前端弹阻塞对话框 ✓。
+    must_change_password: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
     last_login_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

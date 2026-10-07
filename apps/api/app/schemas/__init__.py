@@ -94,6 +94,8 @@ class LoginRequest(BaseModel):
 
 
 class TokenResponse(BaseModel):
+    # 初始/重置口令必须强制修改（2026-10-05 ✓）：前端据此弹阻塞对话框 ✓
+    must_change_password: bool = False
     access_token: str
     token_type: str = "bearer"
     expires_in: int

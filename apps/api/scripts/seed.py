@@ -538,6 +538,7 @@ async def seed_users(
             User(
                 username=username, email=email,
                 hashed_password=hash_password(pwd),
+                must_change_password=True,   # 初始口令强制修改 ✓（2026-10-05）
                 full_name=full_name, role=role,
                 status=UserStatus.ACTIVE, is_superuser=su,
                 department=node.name if node else None,

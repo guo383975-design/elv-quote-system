@@ -66,6 +66,14 @@ import type {
 // ---------------------------------------------------------------------------
 
 export const authApi = {
+  /** 改自己的口令（2026-10-05 ✓）：成功后会清掉"必须改口令"标记 ✓ */
+  async changePassword(oldPassword: string, newPassword: string): Promise<void> {
+    await http.post('/auth/change-password', {
+      old_password: oldPassword,
+      new_password: newPassword,
+    })
+  },
+
   /** 登出：让后端记一条会话留痕（拿不到令牌也无所谓，本地照常清态） */
   async logout(): Promise<void> {
     try {

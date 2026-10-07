@@ -34,6 +34,8 @@ export interface TokenResponse {
   access_token: string
   token_type: string
   expires_in: number
+  /** 初始/重置口令必须先改（2026-10-05 ✓）：前端弹关不掉的对话框 ✓ */
+  must_change_password?: boolean
 }
 
 export interface User {

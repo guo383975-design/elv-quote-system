@@ -1,4 +1,34 @@
 <script setup lang="ts">
+import { extractErrorMessage } from '@/api/client'
+
+const pwdOld = ref('')
+const pwdNew = ref('')
+const pwdNew2 = ref('')
+const pwdSaving = ref(false)
+
+/** 强制改口令（2026-10-05 ✓）：成功后标记清除 → 对话框自动消失 ✓ */
+async function doChangePassword(): Promise<void> {
+  if (pwdNew.value.length < 8) {
+    ElMessage.warning('新口令至少 8 位')
+    return
+  }
+  if (pwdNew.value !== pwdNew2.value) {
+    ElMessage.warning('两次输入的新口令不一致')
+    return
+  }
+  pwdSaving.value = true
+  try {
+    const { authApi } = await import('@/api')
+    await authApi.changePassword(pwdOld.value, pwdNew.value)
+    auth.setMustChangePassword(false)
+    pwdOld.value = pwdNew.value = pwdNew2.value = ''
+    ElMessage.success('口令已修改 ✓')
+  } catch (e) {
+    ElMessage.error(extractErrorMessage(e))
+  } finally {
+    pwdSaving.value = false
+  }
+}
 /**
  * 应用外壳（2026-10-03 按原型第 1 页 ① 区改造：左侧深色栏 → 顶部导航）。
  *
@@ -13,13 +43,13 @@
  * ⚠ 打印样式 `styles/print.css` 依赖 `.app-header` 这个类名来隐藏头部，改名会回归。
  */
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { useAuthStore } from '@/stores/auth'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { authApi, notificationApi } from '@/api'
 import type { AppNotification } from '@/api/types'
 import { dateTime } from '@/utils/format'
-import { useAuthStore } from '@/stores/auth'
 import AiAssistantPanel from '@/components/AiAssistantPanel.vue'
 import { useMetaStore } from '@/stores/meta'
 
@@ -267,6 +297,41 @@ onBeforeUnmount(() => {
          结果就是"开关打开了但悬浮框永远不出现"。 -->
     <AiAssistantPanel v-if="auth.can('ai', 'use')" />
   </el-container>
+
+    <!-- 初始口令强制修改（2026-10-05 用户要求 ✓）：关不掉 ✓，改完才消失 ✓ -->
+    <el-dialog
+      :model-value="auth.mustChangePassword"
+      title="首次登录：请先修改初始口令"
+      width="460px"
+      :show-close="false"
+      :close-on-click-modal="false"
+      :close-on-press-escape="false"
+      append-to-body
+    >
+      <el-alert
+        type="warning"
+        :closable="false"
+        show-icon
+        title="为了账号安全，初始口令必须修改后才能继续使用本系统。"
+        style="margin-bottom: 12px"
+      />
+      <el-form label-width="88px">
+        <el-form-item label="原口令">
+          <el-input v-model="pwdOld" type="password" show-password placeholder="当前口令" />
+        </el-form-item>
+        <el-form-item label="新口令">
+          <el-input v-model="pwdNew" type="password" show-password placeholder="至少 8 位" />
+        </el-form-item>
+        <el-form-item label="确认新口令">
+          <el-input v-model="pwdNew2" type="password" show-password placeholder="再输一次" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button type="primary" :loading="pwdSaving" @click="doChangePassword">
+          修改并继续
+        </el-button>
+      </template>
+    </el-dialog>
 </template>
 
 <style scoped>
