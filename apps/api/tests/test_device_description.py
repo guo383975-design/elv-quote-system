@@ -7,7 +7,7 @@
   ① 设备能存/改**描述**（多行，性能参数就写在这儿）；
   ② 加设备进报价单时，描述**自动带成**「设备参数」（快照）；
   ③ 显式传了设备参数就不覆盖（手工改的内容说了算）；
-  ④ 导出件（Excel）里有「设备参数」这一栏，且写的是那份快照。
+  ④ 导出件里「设备参数」这一栏**只在内部版**出现（客户版一律没有，与客户版 PDF 对齐）。
 """
 
 from __future__ import annotations
@@ -82,10 +82,17 @@ async def test_item_spec_text_is_filled_from_device(
     assert r3.json()["spec_text"] == "手动写的参数", r3.json()
 
 
-async def test_export_has_device_params_column(
+async def test_export_spec_column_only_internal(
     client: AsyncClient, admin_headers
 ) -> None:
-    """④ 导出的 Excel 里有「设备参数」栏，写的是那份快照。"""
+    """④「设备参数」栏只在**内部版** Excel 里出现，客户版一律没有。
+
+    2026-10-07 改（安全修复 + 与 PDF 对齐）：客户版 Excel 以前带着「设备参数」列 ✗
+    —— 客户版 PDF 早就去掉了 ✓。这条测试原先是反着写的（断言客户版**有**该列 ✗），
+    功能改对了、测试没跟着改 ✗ → 现在改成同时钉住两侧 ✓：
+      · 客户版（默认不带 internal）**没有**该列，也没有它的值 ✓
+      · 内部版（?internal=true）**有**该列，且写的是那份快照 ✓
+    """
     dev = await _device(client, admin_headers, code="DSC3", desc="吞吐 5 Gbps")
     prj = (await client.post("/api/v1/projects", headers=admin_headers, json={
         "code": "DSC-P3", "name": "导出测试项目", "customer_name": "客户",
@@ -100,16 +107,28 @@ async def test_export_has_device_params_column(
                             "quantity": "1", "unit_price": "8000"})
     await client.post(f"/api/v1/quotes/{qt['id']}/compute", headers=admin_headers)
 
-    r = await client.get(f"/api/v1/quotes/{qt['id']}/export.xlsx", headers=admin_headers)
-    assert r.status_code == 200, r.text
-    wb = load_workbook(io.BytesIO(r.content))
-    text = " ".join(
-        str(c.value)
-        for ws in wb.worksheets for row in ws.iter_rows() for c in row
-        if c.value is not None
-    )
-    assert "设备参数" in text, "导出件里没有「设备参数」栏"
-    assert "吞吐 5 Gbps" in text, "导出件里没写设备参数的值"
+    async def _sheet_text(*, internal: bool) -> str:
+        url = f"/api/v1/quotes/{qt['id']}/export.xlsx"
+        if internal:
+            url += "?internal=true"
+        r = await client.get(url, headers=admin_headers)
+        assert r.status_code == 200, r.text
+        wb = load_workbook(io.BytesIO(r.content))
+        return " ".join(
+            str(c.value)
+            for ws in wb.worksheets for row in ws.iter_rows() for c in row
+            if c.value is not None
+        )
+
+    # 客户版：不带「设备参数」列，也不带它的值 ✓（这份是要发给甲方的 ✗）
+    customer = await _sheet_text(internal=False)
+    assert "设备参数" not in customer, "客户版 Excel 不该有「设备参数」栏"
+    assert "吞吐 5 Gbps" not in customer, "客户版 Excel 不该带设备参数的值"
+
+    # 内部版：照旧有该列，且写的是那份快照 ✓
+    internal = await _sheet_text(internal=True)
+    assert "设备参数" in internal, "内部版 Excel 里没有「设备参数」栏"
+    assert "吞吐 5 Gbps" in internal, "内部版 Excel 里没写设备参数的值"
 
 
 async def test_spec_column_only_when_present(
