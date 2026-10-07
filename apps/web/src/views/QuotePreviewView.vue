@@ -223,17 +223,21 @@ const taxLabel = computed(() => {
   return `税金（${rate.toFixed(rate % 1 === 0 ? 0 : 1)}%）`
 })
 
-async function downloadPdf(): Promise<void> {
+/** 导出文件（2026-10-05 用户要求 ✓）：打印/导出统一在本页 ✓，**支持所有格式** ✓。
+ *  internal = true 时带成本（仅对有成本权限的人显示按钮 ✓）。 */
+async function downloadFile(format: 'xlsx' | 'pdf', internal = false): Promise<void> {
   exporting.value = true
   try {
-    const { blob, filename } = await quoteApi.exportFile(quoteId.value, 'pdf', false)
+    const { blob, filename } = await quoteApi.exportFile(quoteId.value, format, internal)
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
     a.download = filename
     a.click()
     URL.revokeObjectURL(url)
-    ElMessage.success(`已导出客户版 PDF：${filename}`)
+    ElMessage.success(
+      `已导出${internal ? '内部版' : '客户版'} ${format.toUpperCase()}：${filename}`,
+    )
   } catch (e) {
     ElMessage.error(extractErrorMessage(e))
   } finally {
@@ -288,9 +292,24 @@ function back(): void {
         <span title="客户版永远不显示成本/毛利/采购价（后端导出同样如此）">显示成本毛利（客户版不可选）</span>
       </el-checkbox>
       <div class="spacer" />
-      <el-button size="small" :loading="exporting" @click="downloadPdf">
-        <el-icon><Download /></el-icon>&nbsp;下载 PDF
+      <!-- 导出（2026-10-05 ✓）：所有格式都在客户版预览里出 ✓ -->
+      <el-button size="small" :loading="exporting" @click="downloadFile('xlsx')">
+        <el-icon><Download /></el-icon>&nbsp;客户版 Excel
       </el-button>
+      <el-button size="small" :loading="exporting" @click="downloadFile('pdf')">
+        <el-icon><Download /></el-icon>&nbsp;客户版 PDF
+      </el-button>
+      <el-dropdown v-if="auth.canSeeCost" @command="(c: string) => downloadFile(c.split(':')[0] as 'xlsx' | 'pdf', true)">
+        <el-button size="small" :loading="exporting">
+          内部版<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+        </el-button>
+        <template #dropdown>
+          <el-dropdown-menu>
+            <el-dropdown-item command="xlsx:internal">内部版 Excel（含成本）</el-dropdown-item>
+            <el-dropdown-item command="pdf:internal">内部版 PDF（含成本）</el-dropdown-item>
+          </el-dropdown-menu>
+        </template>
+      </el-dropdown>
       <el-button size="small" type="primary" @click="doPrint">
         <el-icon><Printer /></el-icon>&nbsp;打印
       </el-button>
