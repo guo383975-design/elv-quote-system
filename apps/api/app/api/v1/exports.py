@@ -200,7 +200,13 @@ async def export_quote_xlsx(
     ctx = build_context(
         quote=quote, project=project, items=items, subsystems=subsystems,
         include_cost=include_cost,
-        include_profit=_resolve_include_profit(user),
+        # ⚠ 2026-10-05 修数据泄露：**客户版一律不含毛利** ✗
+        #   原来按用户权限算（_resolve_include_profit）✗ → 有利润权限的账号导出
+        #   「客户版」也会带上毛利/毛利率 ✓，而这份文件是发给甲方的 ✗。
+        #   正确规则（与 PDF 一致 ✓）：先看是不是内部版 ✓，再看有没有利润权限 ✓。
+        include_profit=include_cost and _resolve_include_profit(user),
+        # 客户版不出「设备参数」列 ✓（与 PDF 对齐 ✓；原来漏了 ✓ 表格被它撑宽 ✓）
+        show_spec_column=include_cost,
         settings=await load_export_settings(db),
     )
     # 渲染是几百毫秒的 CPU 独占，放线程池里跑，别卡住事件循环
