@@ -504,9 +504,39 @@ export const quoteApi = {
     const { data } = await http.post<Quote>('/quotes', payload)
     return data
   },
+  /**
+   * 保存报价单（2026-10-05 用户反馈改造）。
+   *
+   * 以前：只要别人碰过这张单，保存一律 409 → 只能手动刷新页面重来 ✗
+   *   （哪怕两人改的是完全不同的字段）。
+   * 现在：
+   *   ① 双方改的字段**不重叠** → 自动带上最新版本重试一次 ✓（用户无感）
+   *   ② 字段**重叠** → 抛错并挂上 conflict 详情 ✓，界面可据此让用户选择保留哪一份
+   *      （错误文案也由后端带上"谁在什么时候改了哪些"，不再只有一句"请刷新"）
+   * 判定字段名的一致性：前端 PATCH 的键 = 后端审计 payload 的键（都是字段名）。
+   */
   async update(id: string, payload: Record<string, unknown>): Promise<Quote> {
-    const { data } = await http.patch<Quote>(`/quotes/${id}`, payload)
-    return data
+    const send = (body: Record<string, unknown>) => http.patch<Quote>(`/quotes/${id}`, body)
+    try {
+      const { data } = await send(payload)
+      return data
+    } catch (e) {
+      const ax = e as { response?: { status?: number; data?: { detail?: unknown } } }
+      const det = ax.response?.data?.detail as
+        | { error?: string; current_version?: number; remote_changed?: string[]; message?: string }
+        | undefined
+      if (ax.response?.status === 409 && det?.error === 'version_conflict') {
+        const mine = new Set(Object.keys(payload).filter((k) => k !== 'version'))
+        const theirs = new Set(det.remote_changed ?? [])
+        const overlap = [...mine].filter((k) => theirs.has(k))
+        if (overlap.length === 0 && typeof det.current_version === 'number') {
+          const { data } = await send({ ...payload, version: det.current_version })
+          return data
+        }
+        ;(e as { conflict?: unknown }).conflict = { ...det, overlap }
+      }
+      throw e
+    }
   },
   async remove(id: string): Promise<void> {
     await http.delete(`/quotes/${id}`)

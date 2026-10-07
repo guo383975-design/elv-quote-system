@@ -38,7 +38,7 @@ interface ValidationIssue {
 
 /** 把后端的各种错误体压成一句可展示的中文。 */
 export function extractErrorMessage(err: unknown): string {
-  const ax = err as AxiosError<{ detail?: string | ValidationIssue[]; error?: string }>
+  const ax = err as AxiosError<{ detail?: string | ValidationIssue[] | { message?: string; error?: string }; error?: string }>
   if (!ax?.response) {
     if (ax?.code === 'ECONNABORTED') return '请求超时，请稍后重试'
     return '无法连接后端服务，请确认 API 已启动'

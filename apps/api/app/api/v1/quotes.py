@@ -481,7 +481,13 @@ async def get_quote(
     return await _load_quote(db, quote_id)
 
 
-def _check_version(quote: Quote, client_version: int | None, *, actor: User | None = None) -> None:
+async def _check_version(
+    db: AsyncSession,
+    quote: Quote,
+    client_version: int | None,
+    *,
+    actor: User | None = None,
+) -> None:
     """乐观锁比对：客户端手上的版本对不上就 409。
 
     quotes.version 这一列一直存在、也一直在响应里返回，但 QuoteUpdate 里没有
@@ -502,13 +508,49 @@ def _check_version(quote: Quote, client_version: int | None, *, actor: User | No
         )
         return
     if int(client_version) != int(quote.version or 1):
+        # 2026-10-05 用户反馈：每次冲突都让用户刷新很麻烦。
+        #   原来只返回一句纯文本（整单级拒绝）→ 前端除了让用户刷新别无他法。
+        #   现在返回结构化信息：前端据此判断「双方改的字段是否重叠」，
+        #   不重叠就自动带最新版本重试（用户无感），重叠才弹窗让用户选。
+        remote_fields: list[str] = []
+        remote_by = None
+        remote_at = None
+        try:
+            _last = (
+                await db.execute(
+                    select(QuoteAuditLog)
+                    .where(
+                        QuoteAuditLog.quote_id == quote.id,
+                        QuoteAuditLog.action == AuditAction.UPDATE,
+                    )
+                    .order_by(QuoteAuditLog.created_at.desc())
+                    .limit(1)
+                )
+            ).scalars().first()
+            if _last is not None:
+                _p = _last.payload if isinstance(_last.payload, dict) else {}
+                remote_fields = [str(k) for k in _p]
+                remote_at = _last.created_at.isoformat() if _last.created_at else None
+                if _last.user_id:
+                    _who = await db.get(User, _last.user_id)
+                    remote_by = getattr(_who, "username", None)
+        except Exception:  # noqa: BLE001 —— 拿不到上下文也不能挡住冲突本身
+            pass
         raise HTTPException(
             status_code=409,
-            detail=(
-                f"这张报价单已被他人修改（你手上的版本 {client_version}，"
-                f"当前版本 {quote.version}）。请刷新页面重新打开后再改，"
-                "以免覆盖别人的修改。"
-            ),
+            detail={
+                "error": "version_conflict",
+                "message": (
+                    f"这张单在你编辑期间被{remote_by or '他人'}改过"
+                    f"（你手上 v{client_version}，当前 v{quote.version}）。"
+                    "系统会先尝试自动合并；若改的是同一项，会让你选择保留哪一份。"
+                ),
+                "your_version": int(client_version),
+                "current_version": int(quote.version or 1),
+                "remote_changed": remote_fields,
+                "remote_by": remote_by,
+                "remote_at": remote_at,
+            },
         )
 
 
@@ -599,7 +641,7 @@ async def update_quote(
 
     # 乐观锁：见 _check_version 的说明。
     # 不传 version 的调用方仍然放行（保持向后兼容），但版本号照样会递增。
-    _check_version(quote, data.pop("version", None), actor=user)
+    await _check_version(db, quote, data.pop("version", None), actor=user)
 
     new_status = data.pop("status", None)
     status_changing = new_status and str(new_status) != str(quote.status)
@@ -899,7 +941,7 @@ async def compute(
         data = body.model_dump(exclude_unset=True)
         # 必须在写入循环之前摘掉 version：它不是 Quote 的字段，
         # 留着会被 setattr 到 ORM 实例上（还会绕过下面的比对）。
-        _check_version(quote, data.pop("version", None), actor=user)
+        await _check_version(db, quote, data.pop("version", None), actor=user)
         for key, value in data.items():
             if value is not None:
                 if key == "labor_float_per_class":
