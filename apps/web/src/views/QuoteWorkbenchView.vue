@@ -1858,12 +1858,12 @@ const clausesVisible = ref(false)
       <el-dialog
         v-model="clausesVisible"
         title="报价条款（客户版）"
-        width="760px"
-        top="6vh"
+        width="min(1320px, 94vw)"
+        top="3vh"
         append-to-body
         class="clauses-dialog"
       >
-        <div style="max-height: 66vh; overflow: auto; padding-right: 6px">
+        <div style="max-height: 78vh; overflow: auto; padding-right: 6px">
       <div class="card" style="margin-top: 12px">
         <div class="card-title">
           报价说明条款（客户版）
@@ -2248,6 +2248,9 @@ const clausesVisible = ref(false)
   background: var(--el-fill-color-lighter); border-radius: 4px; font-size: 13px; }
 
 /* 报价条款弹窗（2026-10-05）：内容再长也不撑页面 ✓ */
+/* 1440×900 下给足宽度 ✓：条款文本单行铺满，不再是一条窄缝 ✓ */
+.clauses-dialog .st-clause { gap: 8px; }
+
 .clauses-dialog .el-dialog__body { padding-top: 8px; }
 
 .acc-block { border: 1px solid var(--el-border-color-lighter); border-radius: 6px;
