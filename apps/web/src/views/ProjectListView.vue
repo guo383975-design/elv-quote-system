@@ -424,7 +424,23 @@ async function openQuote(row: Project): Promise<void> {
         ElMessage.warning('当前角色无法创建报价单，请联系销售或管理员')
         return
       }
-      const created = await quoteApi.create({ project_id: row.id })
+      // 2026-10-05 用户要求：报价模式在建单时就必须确定，之后不可切换 ✓
+      //   套定额 = 人工费按定额库取 ✓；手工 = 自己填人工费 ✓
+      //   这里用两个明确命名的按钮 ✓（不选 = 取消建单 ✗ 不会悄悄建成 manual ✓）
+      const mode = await ElMessageBox.confirm(
+        '这张报价单用哪种报价模式？\n\n· 套定额：人工费按定额库套用（可 AI 预套定额）\n' +
+          '· 手工人工费：人工费由你自行填写\n\n创建之后**不可切换**，请按本次报价的实际情况选择。',
+        '选择报价模式',
+        {
+          confirmButtonText: '套定额模式',
+          cancelButtonText: '手工人工费',
+          distinguishCancelAndClose: true,
+          type: 'info',
+          customClass: 'mode-pick-box',
+        },
+      ).then(() => 'quota').catch((a: string) => (a === 'cancel' ? 'manual' : null))
+      if (mode === null) return
+      const created = await quoteApi.create({ project_id: row.id, install_mode: mode })
       quoteId = created.id
     }
     await router.push({ name: 'quote-workbench', params: { projectId: row.id, quoteId } })

@@ -786,6 +786,16 @@ async def update_quote(
     #   辅材率 / 管理费+毛利率 属于"建单时定死"的口径 ✓ —— 随手能改，
     #   等于所有历史单的算法都能被悄悄改掉 ✗。
     #   只开放 4 项：计税方式 / 税率 / 人工浮动 / 有效期 ✓。
+    # 报价模式（定额 / 手工人工费）：创建单时确定，之后不可切换 ✓
+    #   用户理由：「创建完以后不可以切换，这样能避免很多问题」✓
+    #   注意：**提交相同的值仍然放行** ✓（幂等 ✓ 前端乐观切换失败回滚时不会误伤 ✓）
+    if data.get("install_mode") is not None and str(data["install_mode"]) != str(
+        quote.install_mode or "manual"
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="报价模式在创建报价单时确定、之后不可修改（如需更换，请新建报价单 ✓）",
+        )
     _locked = {"auxiliary_rate": "辅材费率", "mgmt_profit_rate": "管理费+毛利率"}
     _touched = sorted(k for k in _locked if k in data)
     if _touched:

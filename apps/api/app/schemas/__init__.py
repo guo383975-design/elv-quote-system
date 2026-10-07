@@ -564,6 +564,10 @@ class QuoteCreate(BaseModel):
     tax_method: str = "general_9pct"
     tax_rate: Decimal = Field(Decimal("0.09"), ge=RATE_MIN, le=RATE_MAX)
     fee_base: FeeBaseType = FeeBaseType.DEVICE_AUX_INSTALL
+    # 报价模式（2026-10-05 用户要求）：**创建时确定、之后不可切换** ✓
+    #   manual = 手工设置人工费（默认，兼容老调用方 / 脚本）
+    #   quota  = 套定额（人工费按定额库取）
+    install_mode: Literal["manual", "quota"] = "manual"
     auxiliary_base: AuxiliaryBaseType = AuxiliaryBaseType.DEVICE
     auxiliary_rate: Decimal = Field(Decimal("0.06"), ge=RATE_MIN, le=RATE_MAX)
     design_rate: Decimal = Field(Decimal("0.02"), ge=RATE_MIN, le=RATE_MAX)

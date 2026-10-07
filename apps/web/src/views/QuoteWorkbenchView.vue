@@ -1360,7 +1360,7 @@ const clausesVisible = ref(false)
           <el-button type="primary" plain @click="clausesVisible = true">
             <el-icon><Document /></el-icon>&nbsp;报价条款
           </el-button>
-          <el-button type="primary" :loading="aiSuggesting" @click="runAiSuggest">
+          <el-button v-if="installMode === 'quota'" type="primary" :loading="aiSuggesting" @click="runAiSuggest">
             <el-icon><MagicStick /></el-icon>&nbsp;AI 预套定额
           </el-button>
           <el-button v-if="aiPickedCount" @click="confirmBatch">
@@ -1371,7 +1371,8 @@ const clausesVisible = ref(false)
         size="small"
         style="width: 190px"
         @change="onModeChange"
-      >
+       disabled
+                    title="报价模式在建单时确定，之后不可切换（如需更换请新建报价单）">
         <el-option label="手动填安装单价" value="manual" />
         <!-- 定额模式（2026-10-05 复核后重新开放 ✓）：
              实测**不存在重复计** ✓ —— 之前看到的「定额人工费」是未回填保护的**镜像显示** ✗，
