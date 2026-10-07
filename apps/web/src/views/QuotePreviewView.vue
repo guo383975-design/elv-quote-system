@@ -394,7 +394,6 @@ function back(): void {
         <div class="doc-bottom">
           <div class="doc-clauses">
             <div class="doc-section-title">报价说明</div>
-            <span class="text-muted doc-flag">与导出 PDF 同一出处（后端 QUOTE_CLAUSES）</span>
             <ol>
               <li v-for="(c, i) in clauses" :key="i">{{ c }}</li>
             </ol>
@@ -421,7 +420,7 @@ function back(): void {
         </div>
 
         <div class="doc-foot">
-          第 1 页 / 共 1 页　·　本页为报价单首页，后续页为工程量清单与人材机明细
+          第 1 页 / 共 1 页
         </div>
       </div>
     </div>
