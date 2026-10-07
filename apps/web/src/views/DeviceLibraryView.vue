@@ -227,7 +227,9 @@ async function loadTree(): Promise<void> {  try {
 
 function nodeLabel(data: DeviceCategoryNode): string {
   const n = data.total_count ?? 0
-  return n > 0 ? `${data.name}（${n}）` : data.name
+  // 空节点也标出（0）✓（2026-10-05 用户反馈：空目录没有视觉标记 ✗
+  //   看起来像被删了 ✓ → 现在明确显示「（0）」并置灰 ✓）
+  return `${data.name}（${n}）`
 }
 
 function findNode(id: string): DeviceCategoryNode | null {
@@ -1156,7 +1158,7 @@ function actionLabel(action: string): string {
           @node-collapse="rememberTreeExpand"
         >
           <template #default="{ data }">
-            <span class="tree-node">
+            <span class="tree-node" :class="{ 'tree-node--empty': !Number(data.total_count ?? 0) }">
               <span class="tree-label">{{ nodeLabel(data) }}</span>
               <span v-if="canMaintain && data.id !== '__none__'" class="tree-ops">
                 <el-icon title="加子分类" @click.stop="openCatCreate(data)">
@@ -1557,17 +1559,15 @@ function actionLabel(action: string): string {
           </el-form-item>
           <el-form-item label="单位辅材费">
             <el-input-number v-model="form.auxiliary_unit_price" :min="0" :precision="4" :controls="false" />
-            <span class="text-muted" style="margin-left: 8px">
-              辅材口径选「按工程量」时按 Σ(数量 × 本值) 计（桥架按米、网线按箱）
-            </span>
+            <div class="field-hint">
+              辅材口径选「按工程量」时按 Σ(数量 × 本值) 计（桥架按米、网线按箱）</div>
           </el-form-item>
           <el-form-item label="底价">
             <el-input-number v-model="form.min_price" :min="0" :precision="2" :controls="false" />
-            <span class="text-muted" style="margin-left: 8px">
-              低于底价报价需要经理授权 + 理由（0 = 不设底价）
-            </span>
+            <div class="field-hint">
+              低于底价报价需要经理授权 + 理由（0 = 不设底价）</div>
           </el-form-item>
-          <el-form-item label="阶梯价">
+          <el-form-item label="阶梯价" class="span-all">
             <div style="width: 100%">
               <el-table :data="tierRows" size="small" border>
                 <el-table-column label="从(台)">
@@ -1598,9 +1598,8 @@ function actionLabel(action: string): string {
                 </el-table-column>
               </el-table>
               <el-button link type="primary" size="small" @click="addTier">+ 加一档</el-button>
-              <span class="text-muted" style="margin-left: 8px">
-                留空不填 = 不用阶梯价；区间不能重叠（后端会拒）
-              </span>
+              <div class="field-hint">
+                留空不填 = 不用阶梯价；区间不能重叠（后端会拒）</div>
             </div>
           </el-form-item>
         </div>
@@ -2133,6 +2132,11 @@ function actionLabel(action: string): string {
 </template>
 
 <style scoped>
+/* 空分类置灰 ✓（2026-10-05 用户要求 ✓） */
+.tree-node--empty {
+  color: #c0c4cc;
+}
+
 /* 配件/授权编辑区（2026-10-05） */
 .acc-hint {
   color: var(--el-text-color-secondary);

@@ -228,3 +228,29 @@
   max-height: calc(900px - 116px);
   overflow: auto;
 }
+
+/* ---------- 表单排版微调（2026-10-05 修设备编辑弹窗错位）---------- */
+
+/* 说明文字另起一行、小字、次要色 ✓
+   为什么：以前写成行内（跟在输入框后面）✗ → 把所在格撑高 ✓，
+   同一排的其它格看起来就"错位"了 ✓。 */
+.field-hint {
+  display: block;
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--el-text-color-secondary);
+}
+
+/* 让一格横跨整行 ✓（阶梯价这种要宽度的内容 ✓） */
+.grid-3 > .span-all,
+.grid-2 > .span-all {
+  grid-column: 1 / -1;
+}
+
+/* 弹窗里的表单：排与排之间留一点气口 ✓，并让同排各项顶端对齐 ✓ */
+.el-dialog__body .grid-3,
+.el-dialog__body .grid-2 {
+  align-items: start;
+  row-gap: 2px;
+}
