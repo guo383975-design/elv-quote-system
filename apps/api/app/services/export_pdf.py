@@ -32,7 +32,7 @@ from xml.sax.saxutils import escape
 
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
-from reportlab.lib.pagesizes import A4
+from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
@@ -217,7 +217,10 @@ _PAGE_MARGIN = 15 * mm
 # Frame 默认值读出来，而不是写死 12，免得 reportlab 改默认值时悄悄错位。
 _PROBE_FRAME = Frame(0, 0, 100, 100)
 _FRAME_SIDE_PADDING = _PROBE_FRAME.leftPadding + _PROBE_FRAME.rightPadding
-_USABLE_WIDTH = A4[0] - 2 * _PAGE_MARGIN - _FRAME_SIDE_PADDING
+# A4 横向（2026-10-05 用户要求 ✓）：客户版 PDF 一律横向 ✓
+#   纵向时表格可用宽度只有 180mm ✗ → 表头被挤成"一个字一行" ✓（实测 ✓）
+_PAGE_SIZE = landscape(A4)
+_USABLE_WIDTH = _PAGE_SIZE[0] - 2 * _PAGE_MARGIN - _FRAME_SIDE_PADDING
 _FOOTER_Y = 8 * mm
 
 _BODY_SIZE = 9.5      # 信息块 / 备注
@@ -891,7 +894,7 @@ def _story(ctx: ExportContext, theme: _Theme) -> list[Any]:
 def _make_doc(buffer: BytesIO, ctx: ExportContext) -> SimpleDocTemplate:
     doc = SimpleDocTemplate(
         buffer,
-        pagesize=A4,
+        pagesize=_PAGE_SIZE,   # A4 横向 ✓（与客户版预览的纸张一致 ✓）
         leftMargin=_PAGE_MARGIN,
         rightMargin=_PAGE_MARGIN,
         topMargin=_PAGE_MARGIN,
@@ -918,14 +921,14 @@ def _draw_footer(
     canvas.saveState()
     canvas.setStrokeColor(_GRID_LIGHT)
     canvas.setLineWidth(0.4)
-    canvas.line(doc.leftMargin, _FOOTER_Y + 11, A4[0] - doc.rightMargin, _FOOTER_Y + 11)
+    canvas.line(doc.leftMargin, _FOOTER_Y + 11, _PAGE_SIZE[0] - doc.rightMargin, _FOOTER_Y + 11)
     canvas.setFont(fonts.base, _FOOTER_SIZE)
     canvas.setFillColor(_MUTED)
     company = ctx.meta.company_name or ""
     left = f"{company} · 报价单 {ctx.meta.quote_code}".strip(" ·")
     canvas.drawString(doc.leftMargin, _FOOTER_Y, left)
     canvas.drawRightString(
-        A4[0] - doc.rightMargin,
+        _PAGE_SIZE[0] - doc.rightMargin,
         _FOOTER_Y,
         f"第 {canvas.getPageNumber()} 页 / 共 {total_pages} 页",
     )

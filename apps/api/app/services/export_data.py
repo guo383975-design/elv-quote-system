@@ -307,15 +307,22 @@ def ordered_subsystems(subsystems: Iterable[Any]) -> list[Any]:
 
 
 def build_subsystem_rows(subsystems: Iterable[Any]) -> list[ExportSubsystemRow]:
-    """子系统小计。"""
+    """子系统小计：**只列有金额的**（2026-10-05 用户反馈 ✓）。
+
+    以前把全部 10 个子系统都印出来 ✓，大部分是 0.00 ✗ ——
+    客户版 PDF 上就是"一页零" ✓（实测：那一页 223 行里大半是 0 ✓）。
+    序号在过滤**之后**重排 ✓，避免出现 1、3、7 这种跳号 ✓。
+    """
     out: list[ExportSubsystemRow] = []
-    for i, s in enumerate(ordered_subsystems(subsystems), start=1):
+    for s in ordered_subsystems(subsystems):
         eq = Decimal(str(s.equipment_subtotal or 0))
         ins = Decimal(str(s.install_subtotal or 0))
         aux = Decimal(str(s.auxiliary_subtotal or 0))
+        if eq + ins + aux == 0:
+            continue                     # 全零子系统不上客户版 ✓
         out.append(
             ExportSubsystemRow(
-                seq=i,
+                seq=len(out) + 1,
                 name=_s(getattr(s, "custom_name", "")) or label_of(
                     "subsystem_type", getattr(s, "subsystem_type", "")
                 ),

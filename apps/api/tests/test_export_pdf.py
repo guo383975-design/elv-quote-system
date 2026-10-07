@@ -12,7 +12,6 @@ import re
 import zlib
 
 import pytest
-from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
 
@@ -328,8 +327,12 @@ def test_tables_stay_inside_the_page_margins():
     boxes = _absolute_geometry(data)
     assert boxes, "没解出任何几何操作：reportlab 可能改了内容流编码，请更新本测试"
 
-    left, right = 15 * mm, A4[0] - 15 * mm
-    top = A4[1] - 15 * mm
+    # 纸张尺寸以 export_pdf 的 _PAGE_SIZE 为准（2026-10-05 ✓）：
+    #   这里原来写死 A4（纵向）✗ —— 改成 A4 横向后，右边距变成 799.5pt ✓，
+    #   而旧上界 595pt ✗ 会把**完全合规**的 799.37pt 误报成"越过右边距" ✓。
+    _pw, _ph = export_pdf._PAGE_SIZE
+    left, right = 15 * mm, _pw - 15 * mm
+    top = _ph - 15 * mm
     footer_floor = 8 * mm - 1        # 页脚画在下边距以内，属预期
     for x1, y1, x2, y2, kind in boxes:
         assert min(x1, x2) >= left - 0.5, f"越过左边距：{kind} x={min(x1, x2):.2f}"
@@ -461,37 +464,50 @@ def test_item_font_size_shrinks_for_the_14_column_layout():
 
 
 def test_absurd_amounts_never_collapse_a_column_to_zero_width():
-    """金额长到 14 列怎么排都放不下时（保命分支），也绝不能出现 0 宽列 ——
-    0 宽的 Table 列会把文字画成一堆重叠的鬼画符。"""
-    huge = "1,234,567,890,123.45"
-    items = [
-        ExportItemRow(i, "视频监控子系统", _LONG_NAME, "海康威视", "DS-2CD2T46WD-I5", "台",
-                      "123456", huge, huge, "自有设备库", "quota:5-6-001", huge, huge, huge)
-        for i in range(1, 4)
-    ]
-    ctx = ExportContext(
-        meta=_meta(include_cost=True, notes=""),
-        fees=_fees(include_cost=True),
-        subsystems=_subsystems(),
-        items=items,
-    )
-    fonts = export_pdf._prepare_fonts()
-    theme = export_pdf._theme_for(ctx, fonts)
-    _headers, rows, widths = export_pdf._item_table(ctx, theme)
-    needs = export_pdf._column_needs(
-        ctx.item_headers(), rows, header_font=fonts.bold, cell_font=fonts.base,
-        size=theme.item.left.fontSize, padding=export_pdf._ITEM_PADDING,
-    )
+    """金额长到怎么排都放不下时（保命分支），也绝不能出现 0 宽列 ——
+    0 宽的 Table 列会把文字画成一堆重叠的鬼画符。
 
-    assert needs.hard_sum >= export_pdf._USABLE_WIDTH, "这组数据没触发保命分支，测试失去意义"
-    assert min(widths) > 0
+    2026-10-05 ✓：纸张改成 A4 横向后可用宽度变大 ✓ → 触发门槛跟着变 ✓。
+    所以这里**自动加长金额**（金额列不可压缩 ✓）直到真的超过可用宽度 ✓，
+    不再依赖"某个固定的数据长度刚好够" ✗（那样一改纸型就失效 ✓）。
+    """
+    base = "1,234,567,890,123.45"
+    fonts = export_pdf._prepare_fonts()
+
+    needs = None
+    rows: list = []
+    for extra in range(0, 10):
+        huge = base + "0" * extra          # 加长会同时变宽 ✓
+        items = [
+            ExportItemRow(i, "视频监控子系统", _LONG_NAME, "海康威视", "DS-2CD2T46WD-I5", "台",
+                          "123456", huge, huge, "自有设备库", "quota:5-6-001", huge, huge, huge)
+            for i in range(1, 4)
+        ]
+        ctx = ExportContext(
+            meta=_meta(include_cost=True, notes=""),
+            fees=_fees(include_cost=True),
+            subsystems=_subsystems(),
+            items=items,
+        )
+        theme = export_pdf._theme_for(ctx, fonts)
+        _headers, rows, widths = export_pdf._item_table(ctx, theme)
+        needs = export_pdf._column_needs(
+            ctx.item_headers(), rows, header_font=fonts.bold, cell_font=fonts.base,
+            size=theme.item.left.fontSize, padding=export_pdf._ITEM_PADDING,
+        )
+        if needs.hard_sum >= export_pdf._USABLE_WIDTH:
+            break
+
+    assert needs is not None
+    assert needs.hard_sum >= export_pdf._USABLE_WIDTH, (
+        f"加长到 {len(base) + extra} 个字符仍没触发保命分支（hard_sum="
+        f"{needs.hard_sum:.1f} < usable={export_pdf._USABLE_WIDTH:.1f}）✗ 测试失效"
+    )
+    assert min(widths) > 0, "出现了 0 宽列 ✗"
     assert abs(sum(widths) - export_pdf._USABLE_WIDTH) < 1e-6
     assert export_pdf.render(ctx).startswith(b"%PDF-")
 
 
-# ---------------------------------------------------------------------------
-# 3. 多页 + 表头重复 + 总页数正确
-# ---------------------------------------------------------------------------
 
 def test_many_items_span_multiple_pages():
     small = export_pdf.render(_ctx(item_count=3, include_cost=True))
@@ -518,9 +534,15 @@ def test_footer_total_matches_real_page_count():
 
 
 def test_single_page_total_is_one():
+    """少量明细应当很快出完；并**固化"客户版 PDF 必须是 A4 横向"**（2026-10-05 用户要求 ✓）。
+
+    横向页高度只有 595pt ✓（纵向 842pt ✓）→ 同样的内容会更早翻页 ✓，
+    所以这里按"≤2 页"断言 ✓，而不是旧的"恰好 1 页" ✗。
+    """
     ctx = _ctx(item_count=3)
     theme = export_pdf._theme_for(ctx, export_pdf._prepare_fonts())
-    assert export_pdf._count_pages(ctx, theme) == 1
+    assert export_pdf._count_pages(ctx, theme) <= 2
+    assert export_pdf._PAGE_SIZE[0] > export_pdf._PAGE_SIZE[1], "客户版 PDF 必须是 A4 横向 ✓"
 
 
 # ---------------------------------------------------------------------------
