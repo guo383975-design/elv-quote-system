@@ -452,7 +452,10 @@ def _export_settings(
         else (tuple(quote.get("clauses")) if quote.get("clauses") else QUOTE_CLAUSES)
     )
     # 变量：结构化数字（有效期用最终生效值，覆盖后变量也要跟着变）
-    variables = build_variables(quote, valid_days=valid_days)
+    # 每单条款数字（2026-10-05）：本单覆盖 → 系统设置 → 内置默认 ✓
+    variables = build_variables(
+        quote, valid_days=valid_days, overrides=overrides.get("terms_override")
+    )
     return {
         "company_name": company.get("name") or "",
         "company_address": company.get("address") or "",
@@ -466,16 +469,21 @@ def _export_settings(
         "variables": variables,
         "clauses_overridden": bool(override_clauses),
         "valid_days_overridden": bool(overrides.get("valid_days")),
+        "terms_overridden": bool(overrides.get("terms_override")),
     }
 
 
 def _quote_overrides(quote: Any) -> dict:
     """从报价单上读"本单自定义"（没设就是空 dict）。
 
-    字段是 `clauses_override` / `valid_days_override`；两者都可为 NULL，
-    表示"用全局设置"。这样单据级覆盖不会污染其它报价单。
+    字段是 `clauses_override` / `valid_days_override` / `terms_override`；
+    都可为 NULL，表示"用全局设置"。这样单据级覆盖不会污染其它报价单。
+
+    `terms_override`（2026-10-05）：每单可不同的 6 个条款数字 ✓
+    （有效期/预付/验收/质保金/质保期/工期 ✓）。
     """
     return {
+        "terms_override": getattr(quote, "terms_override", None),
         "clauses": getattr(quote, "clauses_override", None),
         "valid_days": getattr(quote, "valid_days_override", None),
     }

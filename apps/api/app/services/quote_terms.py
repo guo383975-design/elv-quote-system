@@ -63,22 +63,41 @@ def render_clauses(clauses: Any, variables: dict[str, Any]) -> tuple[str, ...]:
     也不要静默替换成空字符串把条款变成病句）。
     """
 
+    def _fmt_term(value: object) -> str:
+        """整数值不带小数 ✓（2026-10-05）：条款是印给客户看的 ✓，
+        "预付 50.0%" 不如 "预付 50%" ✓；小数（如 33.5）照常显示 ✓。"""
+        try:
+            num = float(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return str(value)
+        return str(int(num)) if num == int(num) else str(value)
+
     def _sub(m: re.Match[str]) -> str:
         name = m.group(1)
         if name in variables and variables[name] is not None:
-            return str(variables[name])
+            return _fmt_term(variables[name])
         return m.group(0)
 
     return tuple(_VAR_RE.sub(_sub, str(c)) for c in (clauses or []))
 
 
 def build_variables(
-    quote_settings: dict[str, Any], *, valid_days: int | None = None
+    quote_settings: dict[str, Any],
+    *,
+    valid_days: int | None = None,
+    overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """从报价设置里整理出渲染变量（有效期可被单据级覆盖传入）。"""
+    """整理渲染变量：**本单覆盖 → 系统设置 → 内置默认**（2026-10-05 支持每单 ✓）。
+
+    overrides 就是 quotes.terms_override ✓（每单可不同的那 6 个数字 ✓）。
+    为空时行为与以前**完全一致** ✓（全部走系统设置 ✓）。
+    """
     out: dict[str, Any] = {}
     for name in CLAUSE_VARIABLES:
         value = (quote_settings or {}).get(name)
+        own = (overrides or {}).get(name)          # 本单优先 ✓
+        if own is not None:
+            value = own
         out[name] = value if value is not None else DEFAULT_TERMS.get(name)
     if valid_days is not None:
         out["valid_days"] = valid_days

@@ -109,6 +109,13 @@ class Quote(UUIDPKMixin, TimestampMixin, Base):
     # 单据级有效期覆盖（天）：NULL = 用系统设置
     valid_days_override: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    # 每单条款数字覆盖（2026-10-05）：6 个变量的本单取值 ✓
+    #   {valid_days, prepay_ratio, accept_ratio, warranty_ratio,
+    #    warranty_months, build_days} ✓
+    #   为空 = 全部继承「系统设置」里的默认 ✓（行为与以前完全一致 ✓）
+    #   渲染时：本单优先 → 全局兜底 ✓（services/quote_terms.build_variables ✓）
+    terms_override: Mapped[dict[str, Any] | None] = mapped_column(JSONType, nullable=True)
+
     # 批准时间（2026-10-04）：看板按它取"最新一版"与月度趋势。
     # 应用层写 datetime.now(UTC)（微秒精度）；靠 created_at 推断在秒级库里分不出先后。
     approved_at: Mapped[datetime | None] = mapped_column(

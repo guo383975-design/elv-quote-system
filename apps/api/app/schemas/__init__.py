@@ -575,6 +575,35 @@ class QuoteCreate(BaseModel):
     notes: str | None = None
 
 
+# ---- 每单条款数字（2026-10-05）----
+# 6 个变量的取值范围 ✓：比例 0~100% ✓、天数/月数有上限 ✓。
+# 越界直接 422 ✓（宁可在入口拦住 ✗ —— 条款是印给客户看的东西 ✓）。
+_TERM_RANGES: dict[str, tuple[Decimal, Decimal]] = {
+    "valid_days": (Decimal("1"), Decimal("3650")),
+    "prepay_ratio": (Decimal("0"), Decimal("100")),
+    "accept_ratio": (Decimal("0"), Decimal("100")),
+    "warranty_ratio": (Decimal("0"), Decimal("100")),
+    "warranty_months": (Decimal("0"), Decimal("120")),
+    "build_days": (Decimal("1"), Decimal("3650")),
+}
+
+
+def _bounded_terms(value: dict[str, Decimal] | None) -> dict[str, Decimal] | None:
+    """每单条款数字：只认 6 个已知变量 ✓，且落在合理区间内 ✓。"""
+    if value is None:
+        return None
+    out: dict[str, Decimal] = {}
+    for name, raw in value.items():
+        if name not in _TERM_RANGES:
+            raise ValueError(f"条款变量不存在：{name}（可用：{'、'.join(_TERM_RANGES)}）")
+        num = Decimal(str(raw))
+        lo, hi = _TERM_RANGES[name]
+        if num < lo or num > hi:
+            raise ValueError(f"{name} 超出范围：应在 {lo} ~ {hi} 之间")
+        out[name] = num
+    return out
+
+
 class QuoteUpdate(BaseModel):
     # 单据级条款覆盖（2026-10-05）：传 null = 恢复用系统设置；
     # 支持 {valid_days} 之类变量，渲染时按本单生效值替换。
@@ -602,6 +631,12 @@ class QuoteUpdate(BaseModel):
     labor_float_per_class: LaborFloatPerClass = None
     notes: str | None = None
 
+
+    # 每单条款数字（2026-10-05）：6 个变量的本单取值 ✓
+    #   为空 = 继承系统设置 ✓（行为与以前一致 ✓）
+    terms_override: Annotated[
+        dict[str, Decimal] | None, AfterValidator(_bounded_terms)
+    ] = None
 
 class QuoteOut(ORMBase):
     # 安装单价方式（2026-10-05）：缺省 manual ✓（老单子不受影响 ✓）
@@ -649,6 +684,9 @@ class QuoteOut(ORMBase):
     created_at: datetime
     updated_at: datetime
 
+
+    # 每单条款数字 ✓（为空表示继承系统设置 ✓）
+    terms_override: dict[str, Any] | None = None
 
 class QuoteDetailOut(QuoteOut):
     """Quote with items inline."""

@@ -717,6 +717,41 @@ async def update_quote(
             )
         _assert_editable(quote, user)
 
+    # JSONB 不接受 Decimal（2026-10-05 实测 500）：
+    #   StatementError: Object of type Decimal is not JSON serializable
+    #   schema 校验后是 Decimal ✓（要精确 ✓），但写 JSON 列前必须归一化 ✓。
+    #   terms_override 与 labor_float_per_class 都是 JSON 列 ✓ → 一起处理 ✓。
+    for _json_key in ("terms_override", "labor_float_per_class"):
+        if data.get(_json_key) is not None:
+            data[_json_key] = _normalize_jsonable(data[_json_key])
+
+    # 条款/策略改动留痕（2026-10-05 ✓）：用户要求"改好的条款在保存报价单时有记录" ✓
+    #   记**改了哪些字段** + 条款全文与每单数字的快照 ✓（金额类字段也一并记 ✓）。
+    _tracked = (
+        "clauses_override", "terms_override", "valid_days_override",
+        "tax_method", "tax_rate", "labor_float_rate", "labor_float_per_class",
+    )
+    _changed = {k: data[k] for k in _tracked if k in data}
+    if _changed:
+        db.add(
+            quote_audit(
+                quote_id=quote.id,
+                quote_code=quote.code,
+                user_id=user.id,
+                action=AuditAction.UPDATE,
+                payload={
+                    "changed": sorted(_changed),
+                    "clauses_override": _changed.get("clauses_override"),
+                    "terms_override": _changed.get("terms_override"),
+                    "valid_days_override": _changed.get("valid_days_override"),
+                    "tax": {
+                        "method": _changed.get("tax_method"),
+                        "rate": _changed.get("tax_rate"),
+                    },
+                    "labor_float_rate": _changed.get("labor_float_rate"),
+                },
+            )
+        )
     for key, value in _drop_none_for_not_null(Quote, data).items():
         if key == "labor_float_per_class":
             value = _normalize_jsonable(value)
@@ -1401,6 +1436,8 @@ async def quote_export_clauses(
         settings_overrides={
             "clauses": getattr(quote, "clauses_override", None),
             "valid_days": getattr(quote, "valid_days_override", None),
+            # 每单条款数字（2026-10-05）✓：本单改过就用本单的 ✓
+            "terms_override": getattr(quote, "terms_override", None),
         },
     )
     return {
@@ -1411,6 +1448,9 @@ async def quote_export_clauses(
         "available_variables": CLAUSE_VARIABLES,
         "clauses_overridden": exp["clauses_overridden"],
         "valid_days_overridden": exp["valid_days_overridden"],
+        # 供前端把"本单数字"填进输入框 ✓（未覆盖就是系统设置里的生效值 ✓）
+        "terms_override": getattr(quote, "terms_override", None),
+        "terms_overridden": exp["terms_overridden"],
         "company": s["company"],
     }
 
