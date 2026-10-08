@@ -25,7 +25,7 @@ def _meta(**kw) -> ExportMeta:
     base = {
         "quote_code": "QT-202609-0001",
         "title": "智能化弱电工程报价单",
-        "version_label": "2026-10-08 15:33",
+        "version_label": "2026-10-08 15:33:07",
         "status_label": "已提交",
         "project_code": "PRJ-202609-0001",
         "project_name": "某商业综合体弱电工程",

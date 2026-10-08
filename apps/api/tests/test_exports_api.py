@@ -151,7 +151,7 @@ async def test_export_shows_business_version_not_lock_counter(
             tz = ZoneInfo("Asia/Shanghai")
         except Exception:  # noqa: BLE001
             tz = None
-        return datetime.fromisoformat(iso).astimezone(tz).strftime("%Y-%m-%d %H:%M")
+        return datetime.fromisoformat(iso).astimezone(tz).strftime("%Y-%m-%d %H:%M:%S")
 
     p = await _make_project(db, code="PRJ-EXP-VER")
     q = await _make_quote_with_items(client, admin_headers, p.id, devices, qty=1)

@@ -59,6 +59,26 @@ export function dateTime(v: string | null | undefined): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
+/**
+ * ISO 时间 -> YYYY-MM-DD HH:mm:ss（**版本标记专用**，2026-10-08 用户要求精确到秒）。
+ *
+ * 为什么版本标记要秒级：用户的口径是「每次保存并重算 = 一个版本，版本号以时间为标记」✓，
+ * 而连续保存两次往往落在同一分钟里 —— 分钟粒度下两个版本会显示成**一模一样**的字符串 ✗，
+ * 用户就没法用它区分两版了 ✓。
+ *
+ * ⚠ 只给版本标记用 ✓；操作留痕之类继续用 `dateTime()`（分钟）—— 免得整页时间都变长更难读。
+ */
+export function dateTimeSec(v: string | null | undefined): string {
+  if (!v) return '—'
+  const d = new Date(v)
+  if (Number.isNaN(d.getTime())) return v
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return (
+    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
+    `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+  )
+}
+
 /** ISO 时间 -> YYYY-MM-DD。 */
 export function dateOnly(v: string | null | undefined): string {
   if (!v) return '—'

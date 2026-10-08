@@ -63,7 +63,8 @@ class ExportMeta:
     quote_code: str
     title: str
     # **业务版本的时间标记**（2026-10-08 用户要求「版本号以时间为标记」）✓：
-    #   形如 `2026-10-08 15:33`；**空串 = 一次都没保存过 → 导出的信息表里省略这一项** ✓。
+    #   形如 `2026-10-08 15:33:07`（**秒级** ✓ —— 同一分钟内的两次保存也要能分清 ✓）；
+    #   **空串 = 一次都没保存过 → 导出的信息表里省略这一项** ✓。
     # ⚠ 绝不能填 quotes.version ✗ —— 那是乐观锁计数器（每次写库 +1）✗，
     #   生产实证：某单业务上只有 2 版、计数器却已经 9 ✓，印在给甲方的报价单上就是错数 ✗。
     version_label: str
@@ -466,7 +467,10 @@ except Exception:  # noqa: BLE001 —— 任何取不到时区库的原因都降
 
 
 def version_label_of(quote: Any) -> str:
-    """最新一版快照的**时间标记**（YYYY-MM-DD HH:mm，服务时区）。
+    """最新一版快照的**时间标记**（YYYY-MM-DD HH:mm:ss，服务时区）。
+
+    **秒级**（2026-10-08 用户要求）：连续保存两次常常落在同一分钟里，
+    分钟粒度下导出件上两个版本会印成一样 ✗，就没法当版本标记用了 ✓。
 
     一次都没保存过 → 空串 ✓（导出件里**省略**版本这一项 ✓，不能印「V—」/「V0」✗）。
     """
@@ -476,7 +480,7 @@ def version_label_of(quote: Any) -> str:
     try:
         # _VERSION_TZ 为 None（拿不到 tzdata）时 astimezone(None) = 服务器本地时区，
         # 与"生成时间"那一栏同口径，至少不会自相矛盾 ✓。
-        return at.astimezone(_VERSION_TZ).strftime("%Y-%m-%d %H:%M")
+        return at.astimezone(_VERSION_TZ).strftime("%Y-%m-%d %H:%M:%S")
     except (AttributeError, ValueError, OSError):  # 拿脏值也不能让导出 500
         return ""
 

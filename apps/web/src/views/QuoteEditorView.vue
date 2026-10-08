@@ -33,6 +33,7 @@ import { useAuthStore } from '@/stores/auth'
 import { useMetaStore } from '@/stores/meta'
 import {
   dateTime,
+  dateTimeSec,
   money,
   percentInputToRatio,
   ratioToPercentInput,
@@ -900,7 +901,7 @@ function openInquiryImport(): void {
                  新建的单只选了一台录像机就显示 v9 ✗；用户要求「版本号以时间为标记」✓）。
                  没保存过 → 「未保存版本」✓，不显示数字 ✓。 -->
             <template v-if="quote.latest_revision_at">
-              · 版本 {{ dateTime(quote.latest_revision_at) }}
+              · 版本 {{ dateTimeSec(quote.latest_revision_at) }}
             </template>
             <span v-else class="text-muted"> · 未保存版本</span>
             · <el-tag size="small" :type="locked ? 'success' : 'info'" effect="plain">

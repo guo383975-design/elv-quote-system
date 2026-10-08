@@ -5,7 +5,7 @@ import { useRouter } from 'vue-router'
 
 import { projectApi, quoteApi, settingApi, customerApi } from '@/api'
 import type { AuditLogEntry, Project, Quote , Customer } from '@/api/types'
-import { dateOnly, dateTime, money, percentInputToRatio, ratioToPercentInput, toNum } from '@/utils/format'
+import { dateOnly, dateTime, dateTimeSec, money, percentInputToRatio, ratioToPercentInput, toNum } from '@/utils/format'
 import {
   effectiveValidDays,
   validityHint,
@@ -646,14 +646,14 @@ async function openSubsystems(row: Project): Promise<void> {
                      每次写库都 +1（加明细/改数量/算价/流转），于是刚建的单
                      "只选了一台录像机"就显示 v9 ✗（2026-10-08 用户反馈的真因 ✓）。
                      没保存过 → 显示「—」✓，不再出现数字 ✓。 -->
-                <el-table-column label="版本" width="130">
+                <el-table-column label="版本" width="165">
                   <template #default="{ row: q }">
                     <el-tooltip
                       v-if="q.latest_revision_at"
-                      :content="`最近一次保存的版本：${dateTime(q.latest_revision_at)}（共 ${q.revision_count ?? 1} 个版本快照）`"
+                      :content="`最近一次保存的版本：${dateTimeSec(q.latest_revision_at)}（共 ${q.revision_count ?? 1} 个版本快照）`"
                       placement="top"
                     >
-                      <span>{{ dateTime(q.latest_revision_at) }}</span>
+                      <span>{{ dateTimeSec(q.latest_revision_at) }}</span>
                     </el-tooltip>
                     <el-tooltip
                       v-else

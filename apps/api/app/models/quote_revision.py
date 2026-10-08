@@ -26,7 +26,10 @@ class QuoteRevision(Base, UUIDPKMixin):
     quote_id: Mapped[UUID] = mapped_column(
         UUIDType, ForeignKey("quotes.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    # 单内自增序号（1,2,3…），用户看到的是"第 N 版"
+    # 单内自增序号（1,2,3…）。**内部用** ✓：版本排序、两版对比、追溯 ✓。
+    # ⚠ 2026-10-08 起**不再当"版本号"展示给用户** ✗ —— 用户看到的是
+    #   `created_at` 的**时间标记**（"版本号以时间为标记"✓，见 services/revisions.py
+    #   的 attach_revision_stats 与 web 的 dateTimeSec）。
     seq: Mapped[int] = mapped_column(Integer, nullable=False)
     # 快照时刻 quotes.version 的值（乐观锁计数器）
     version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

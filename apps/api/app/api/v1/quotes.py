@@ -1383,7 +1383,16 @@ async def create_revision(
     rev = await save_revision(db, quote, reason="manual", user=user, note=note, dedupe=False)
     if rev is None:  # pragma: no cover - dedupe=False 时不会发生
         raise HTTPException(status_code=409, detail="无法保存版本")
-    return {"id": str(rev.id), "seq": rev.seq, "reason": rev.reason}
+    # 先 refresh 再读 created_at：它是 `server_default=func.now()`（库侧写入的），
+    # 在 async 上下文里直接访问会触发**同步**懒加载 → MissingGreenlet ✗。
+    # 界面按时间标记提示「已保存版本（2026-10-08 17:04:23）」需要这个值 ✓。
+    await db.refresh(rev)
+    return {
+        "id": str(rev.id),
+        "seq": rev.seq,
+        "reason": rev.reason,
+        "created_at": rev.created_at.isoformat() if rev.created_at else None,
+    }
 
 
 @router.get("/{quote_id}/revisions/diff", summary="两版之间的差异（含税合计差了多少钱）")

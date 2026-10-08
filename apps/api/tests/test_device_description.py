@@ -142,7 +142,7 @@ async def test_spec_column_only_when_present(
     from app.services.export_data import ExportContext, ExportItemRow, ExportMeta
 
     meta = ExportMeta(
-        quote_code="Q", title="t", version_label="2026-10-08 15:33", status_label="草稿",
+        quote_code="Q", title="t", version_label="2026-10-08 15:33:07", status_label="草稿",
         project_code="P",
         project_name="p", customer_name="c", customer_contact="", customer_phone="",
         address="", tax_method_label="", tax_rate_pct="9%", generated_at="now",

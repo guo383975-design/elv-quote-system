@@ -1857,6 +1857,12 @@ async def test_save_and_compute_skips_identical_snapshot(
     ]
     # 时间标记必须跟着**最新一版**走（取 min / 取第一版都会在这里露馅 ✓）
     assert second_at and first_at and second_at > first_at, (first_at, second_at)
+    # ★ 用户 2026-10-08 的验收标准：**同一分钟内**保存两次，秒级标记必须不同 ✓。
+    #   `[:19]` 就是 ISO 的秒级部分（YYYY-MM-DDTHH:MM:SS）—— 与界面/导出件的
+    #   `YYYY-MM-DD HH:MM:SS` 逐位对应 ✓（时区换算不会改变"两个时刻是否相同"✓）。
+    assert second_at[:19] != first_at[:19], (first_at, second_at)
+    #   同分钟（前 16 位 YYYY-MM-DDTHH:MM）—— 说明区分两个版本靠的正是**秒** ✓
+    assert second_at[:16] == first_at[:16], (first_at, second_at)
 
     reasons = [
         r["reason"]
@@ -1870,7 +1876,7 @@ async def test_save_and_compute_skips_identical_snapshot(
 async def test_patch_response_carries_business_version(
     client: AsyncClient, admin_headers
 ) -> None:
-    """提交/批准落版后，PATCH 的响应里「第几版」要立刻跟上。
+    """提交/批准落版后，PATCH 的响应里业务版本标记要立刻跟上。
 
     前端在一次流转后可能直接用响应更新界面（不重拉详情），响应里的业务版本
     停在 0 的话，刚提交完反而显示「未保存版本」✗。

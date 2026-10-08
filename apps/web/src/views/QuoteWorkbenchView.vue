@@ -41,7 +41,7 @@ import type {
   RevisionDiff,
   ApprovalChain,
 } from '@/api/types'
-import { dateTime, money, percentInputToRatio, ratioToPercentInput, toNum } from '@/utils/format'
+import { dateTime, dateTimeSec, money, percentInputToRatio, ratioToPercentInput, toNum } from '@/utils/format'
 import {
   effectiveValidDays,
   formatLocalDate,
@@ -385,7 +385,11 @@ async function saveRevisionNow(): Promise<void> {
       inputPlaceholder: '如：甲方砍价后',
     })
     const r = await quoteApi.saveRevision(quoteId.value, value || undefined)
-    ElMessage.success(`已保存为第 ${r.seq} 版`)
+    // 提示里也用**时间标记** ✓（原来是「已保存为第 N 版」✗ —— 用户要的是纯时间 ✓）
+    ElMessage.success(
+      `已保存版本（${dateTimeSec(r.created_at)}）` +
+        (value ? `：${value}` : ''),
+    )
     await loadRevisions()
   } catch (e) {
     if (e !== 'cancel') ElMessage.error(extractErrorMessage(e))
@@ -2318,21 +2322,23 @@ const clausesVisible = ref(false)
           </el-button>
         </el-form-item>
         <el-form-item label="对比">
-          <el-select v-model="revFrom" style="width: 130px" placeholder="旧版">
+          <!-- 版本就按**时间标记**称呼 ✓（2026-10-08 用户要求：不再出现「第 N 版」✗）。
+               seq 仍作为下拉的 value 传给 diff 接口 ✓（内部排序/追溯用 ✓）。 -->
+          <el-select v-model="revFrom" style="width: 210px" placeholder="较早的版本">
             <el-option
               v-for="r in revisions"
               :key="`f-${r.seq}`"
               :value="r.seq"
-              :label="`第 ${r.seq} 版 · ${REASON_LABEL[r.reason] ?? r.reason}`"
+              :label="`${dateTimeSec(r.created_at)} · ${REASON_LABEL[r.reason] ?? r.reason}`"
             />
           </el-select>
           <span style="margin: 0 6px">→</span>
-          <el-select v-model="revTo" style="width: 130px" placeholder="新版">
+          <el-select v-model="revTo" style="width: 210px" placeholder="较晚的版本">
             <el-option
               v-for="r in revisions"
               :key="`t-${r.seq}`"
               :value="r.seq"
-              :label="`第 ${r.seq} 版 · ${REASON_LABEL[r.reason] ?? r.reason}`"
+              :label="`${dateTimeSec(r.created_at)} · ${REASON_LABEL[r.reason] ?? r.reason}`"
             />
           </el-select>
           <el-button type="primary" style="margin-left: 8px" @click="runDiff">对比</el-button>
@@ -2340,10 +2346,10 @@ const clausesVisible = ref(false)
       </el-form>
 
       <el-table v-loading="revLoading" :data="revisions" border size="small" max-height="240">
-        <el-table-column prop="seq" label="版本" width="70">
-          <template #default="{ row }">第 {{ row.seq }} 版</template>
-        </el-table-column>
-        <el-table-column label="来源" width="100">
+        <!-- 「版本」列原来显示「第 N 版」✗ —— 用户要的是**纯时间标记** ✓，
+             而时间这一列本来就有 ✓，所以这里整列去掉（seq 仍存在于数据里 ✓，
+             下拉选择器与两版对比都用它 ✓）。 -->
+        <el-table-column label="来源" width="110">
           <template #default="{ row }">
             <el-tag size="small" effect="plain">
               {{ REASON_LABEL[row.reason] ?? row.reason }}
@@ -2359,8 +2365,9 @@ const clausesVisible = ref(false)
         </el-table-column>
         <el-table-column prop="note" label="备注" min-width="140" show-overflow-tooltip />
         <el-table-column prop="created_by_name" label="操作人" width="100" />
-        <el-table-column label="时间" width="150">
-          <template #default="{ row }">{{ row.created_at ? dateTime(row.created_at) : '—' }}</template>
+        <!-- 版本标记精确到秒 ✓：同一分钟内保存两次也要能分清哪版是哪版 ✓ -->
+        <el-table-column label="时间" width="180">
+          <template #default="{ row }">{{ row.created_at ? dateTimeSec(row.created_at) : '—' }}</template>
         </el-table-column>
         <template #empty>
           <el-empty description="还没有版本快照（提交或批准时会自动保存）" :image-size="60" />
@@ -2368,8 +2375,14 @@ const clausesVisible = ref(false)
       </el-table>
 
       <template v-if="revDiff">
+        <!-- 对比标题也用**时间标记**称呼这两版 ✓（不再写「第 N 版」✗） -->
         <div class="card-title" style="margin-top: 14px">
-          第 {{ revDiff.from.seq }} 版 → 第 {{ revDiff.to.seq }} 版
+          {{ dateTimeSec(revDiff.from.created_at) }}
+          <span class="text-muted">
+            （{{ REASON_LABEL[revDiff.from.reason] ?? revDiff.from.reason }}）</span>
+          → {{ dateTimeSec(revDiff.to.created_at) }}
+          <span class="text-muted">
+            （{{ REASON_LABEL[revDiff.to.reason] ?? revDiff.to.reason }}）</span>
         </div>
 
         <el-alert

@@ -475,8 +475,11 @@ export const quoteApi = {
   },
 
   /** 手动存一版（谈判过程打点） */
-  async saveRevision(quoteId: string, note?: string): Promise<{ seq: number }> {
-    const { data } = await http.post<{ seq: number }>(
+  async saveRevision(
+    quoteId: string,
+    note?: string,
+  ): Promise<{ seq: number; created_at: string | null }> {
+    const { data } = await http.post<{ seq: number; created_at: string | null }>(
       `/quotes/${quoteId}/revisions`,
       {},
       { params: { note } },
