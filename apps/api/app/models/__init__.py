@@ -23,6 +23,7 @@ from app.models.device import (
     DevicePriceTier,
     DeviceStatus,
 )
+from app.models.factory_reset_log import FactoryResetLog
 from app.models.import_batch import ImportBatch, ImportKind, ImportStatus
 from app.models.labor import LaborClass, LaborRate, QuotaCategory, QuotaItem
 from app.models.notification import Notification, NotificationKind
@@ -89,6 +90,7 @@ __all__ = [
     "AiTask",
     "AiUsageLog",
     "AuditAction",
+    "FactoryResetLog",
 ]
 
 

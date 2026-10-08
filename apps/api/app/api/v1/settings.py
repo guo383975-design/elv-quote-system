@@ -515,10 +515,21 @@ async def factory_reset(
     from app.services.factory_reset import (
         SCOPES,
         BackupError,
+        FactoryResetDisabledError,
+        ensure_enabled,
         perform,
     )
 
     _require_admin(user)
+    # 环境闸门（2026-10-08 事故后新增，默认关闭）：
+    # 原设计只有"admin + 手打短语 + 密码"，任何拿到 admin 令牌的人/脚本都能
+    # 一键清库 —— 而该接口的清理范围连 *_audit_logs 一起删，事后查无可查。
+    # 现在未显式开启 ALLOW_FACTORY_RESET 时直接 403，**连密码都不校验**。
+    try:
+        ensure_enabled()
+    except FactoryResetDisabledError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
     if body.scope not in SCOPES:
         raise HTTPException(status_code=422, detail=f"未知范围：{body.scope}")
     try:
@@ -530,6 +541,9 @@ async def factory_reset(
             confirm_text=body.confirm_text,
             dry_run=body.dry_run,
         )
+    except FactoryResetDisabledError as exc:
+        # perform() 里再查一次（防止有人绕过路由直接调服务）
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except PermissionError as exc:
         # 短语/密码不对：401 更贴切（是"没通过校验"），并把原因说清楚
         raise HTTPException(status_code=401, detail=str(exc)) from exc

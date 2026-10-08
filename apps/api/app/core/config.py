@@ -70,6 +70,20 @@ class Settings(BaseSettings):
     app_host: str = Field(default="0.0.0.0")
     app_port: int = Field(default=8000)
 
+    # ----- 高危操作闸门（2026-10-08 事故后新增）-----
+    # 背景：2026-10-08 生产库的 projects/quotes/quote_items 被清空，且**没有留下
+    # 任何痕迹**（`factory_reset` 的清理范围里就含 *_audit_logs）。
+    # 「恢复出厂设置」原来只有两道门：admin 权限 + 手打确认短语 ——
+    # 于是任何拿到 admin 令牌的人或脚本（包括临时签发的子代理令牌）都能一键清库。
+    # 现在**再叠加一道环境闸门**，默认关闭：未显式开启时接口一律 403。
+    allow_factory_reset: bool = Field(
+        default=False,
+        description=(
+            "是否允许「恢复出厂设置」。默认 false = POST /settings/factory-reset 一律 403。"
+            "开启方式见 deploy/api.env 与 AI_INSTALL.md；用完必须立刻关回去。"
+        ),
+    )
+
     # ----- CORS -----
     cors_origins: str = Field(
         default="http://localhost:5173,http://localhost:3000",
