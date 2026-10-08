@@ -42,6 +42,7 @@ from app.models.subsystem import Subsystem
 from app.models.user import User
 from app.services.audit import quote_audit
 from app.services.export_data import ExportContext, build_context
+from app.services.revisions import attach_revision_stats
 from app.services.settings import load_export_settings
 
 router = APIRouter(prefix="/quotes", tags=["报价单导出"])
@@ -77,6 +78,9 @@ async def _load_for_export(
             .order_by(Subsystem.sort_order, Subsystem.id)
         )
     )
+    # 导出件上要印的是**业务版本**（第几版），不是乐观锁计数器 ✗
+    # （2026-10-08 用户反馈：界面/PDF 上的 V9 其实是锁计数，业务上只有 2 版）。
+    await attach_revision_stats(db, [quote])
     return quote, project, subsystems
 
 
@@ -150,7 +154,11 @@ async def _audit_export(
 
 def _base_name(ctx: ExportContext) -> str:
     code = ctx.meta.quote_code or "quote"
-    return f"报价单_{code}_v{ctx.meta.version}"
+    # 下载文件名上的也是**业务版本的时间标记** ✓；没保存过任何版本就不带后缀 ✓
+    # （不能写成 `_v0` ✗ —— 那是把"没保存过"说成了"第 0 版"✗）
+    # 文件名里不欢迎空格与冒号 → 换成紧凑形式 2026-10-08 15:33 → 20261008-1533 ✓
+    stamp = (ctx.meta.version_label or "").replace("-", "").replace(":", "").replace(" ", "-")
+    return f"报价单_{code}_{stamp}" if stamp else f"报价单_{code}"
 
 
 def _renderer(kind: str):

@@ -895,7 +895,14 @@ function openInquiryImport(): void {
         <p class="page-sub">
           {{ project?.code }} · 客户 {{ project?.customer_name }}
           <template v-if="quote">
-            · 报价单 <b>{{ quote.code }}</b> v{{ quote.version }}
+            · 报价单 <b>{{ quote.code }}</b>
+            <!-- 版本 = **业务版本的时间标记** ✓（不是乐观锁计数器 ✗；2026-10-08 用户反馈：
+                 新建的单只选了一台录像机就显示 v9 ✗；用户要求「版本号以时间为标记」✓）。
+                 没保存过 → 「未保存版本」✓，不显示数字 ✓。 -->
+            <template v-if="quote.latest_revision_at">
+              · 版本 {{ dateTime(quote.latest_revision_at) }}
+            </template>
+            <span v-else class="text-muted"> · 未保存版本</span>
             · <el-tag size="small" :type="locked ? 'success' : 'info'" effect="plain">
               {{ meta.label('quote_status', quote.status) }}
             </el-tag>

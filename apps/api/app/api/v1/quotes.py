@@ -54,7 +54,12 @@ from app.services.quote_compute import (
     parse_quota_code,
     write_breakdown_to_quote,
 )
-from app.services.revisions import diff_snapshots, diff_totals, save_revision
+from app.services.revisions import (
+    attach_revision_stats,
+    diff_snapshots,
+    diff_totals,
+    save_revision,
+)
 from app.services.settings import load_export_settings, load_settings
 
 router = APIRouter(prefix="/quotes", tags=["报价单"])
@@ -355,6 +360,8 @@ async def list_quotes(
             .limit(page_size)
         )
     ).all()
+    # 业务版本（第几版）= quote_revisions.seq 最大值；列表一次 group by 全部查出来 ✓
+    await attach_revision_stats(db, rows)
     return Page[QuoteOut](
         items=[QuoteOut.model_validate(r) for r in rows],
         total=total or 0,
@@ -550,7 +557,10 @@ async def get_quote(
     db: Annotated[AsyncSession, Depends(get_db)],
     user: Annotated[User, Depends(require_permission("quote", "read"))],
 ) -> Quote:
-    return await _load_quote(db, quote_id)
+    quote = await _load_quote(db, quote_id)
+    # 页头要显示「第几版」——业务版本，不是乐观锁计数器 ✓
+    await attach_revision_stats(db, [quote])
+    return quote
 
 
 async def _check_version(
@@ -614,7 +624,10 @@ async def _check_version(
                 "error": "version_conflict",
                 "message": (
                     f"这张单在你编辑期间被{remote_by or '他人'}改过"
-                    f"（你手上 v{client_version}，当前 v{quote.version}）。"
+                    # 措辞（2026-10-08 用户反馈）：这里出现的是**乐观锁计数器** ✗，
+                    # 不能叫「版本」✗ ——「版本」现在是业务概念（第几版，见
+                    # quote_revisions.seq）✓。叫「编辑序号」才不会被误读成"我改了 9 版"✓。
+                    f"（你手上的编辑序号 {client_version}，当前 {quote.version}）。"
                     "系统会先尝试自动合并；若改的是同一项，会让你选择保留哪一份。"
                 ),
                 "your_version": int(client_version),
@@ -982,6 +995,8 @@ async def update_quote(
         quote.version = int(quote.version or 1) + 1
         await db.flush()
     await db.refresh(quote)
+    # 流转到已提交/已批准时刚落了一版快照 → 让响应里的"第几版"立刻跟上 ✓
+    await attach_revision_stats(db, [quote])
     return quote
 
 
@@ -1070,6 +1085,17 @@ async def compute(
                     value = _normalize_jsonable(value)
                 setattr(quote, key, value)
     quote = await _recompute(db, quote, actor_id=user.id)
+    # ★ 版本快照（2026-10-08 用户要求）：「每次保存并重算就应该生成一个版本，方便追溯，
+    #   版本号以时间为标记」✓ —— 这个端点就是界面上那个「保存并重算」按钮 ✓。
+    #
+    # ⚠ 必须**只**在这条路径插版本 ✗ 不能放进 `_recompute()` ✗：
+    #   加明细 / 改数量 / 改单价 / 删行 / 改费率 都会顺带调 `_recompute` ✓，
+    #   放进去就等于"选一台录像机涨一格" ✗ —— 那正是用户上一个投诉 ✓。
+    #
+    # `dedupe=True`：快照与最新一版完全一致（没改任何东西又点了一次）就跳过 ✓，
+    #   不造"同一份内容的一堆时间戳"这种噪声版本 ✓（用户的诉求是**可追溯** ✓，
+    #   重复的空版本只会让历史更难读 ✗）。内容有变 → 一定落新版 ✓。
+    await save_revision(db, quote, reason="saved", user=user)
     return _compute_result(quote, user)
 
 

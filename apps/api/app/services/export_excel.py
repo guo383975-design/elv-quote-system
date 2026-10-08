@@ -158,7 +158,13 @@ def _sheet_summary(wb: Workbook, ctx: ExportContext) -> None:
 
     info: list[tuple[str, str]] = [
         ("报价单号", m.quote_code),
-        ("版本", f"v{m.version}"),
+    ]
+    # 版本 = **业务版本的时间标记**（2026-10-08 用户要求「版本号以时间为标记」）✓；
+    # 一次都没保存过 → version_label 为空 → **整行省略** ✓
+    # （不能印「v0」/「v—」✗ —— 那是把"没保存过"说成了某个版本 ✗）
+    if m.version_label:
+        info.append(("版本", m.version_label))
+    info += [
         ("状态", m.status_label),
         ("项目编号", m.project_code),
         ("项目名称", m.project_name),

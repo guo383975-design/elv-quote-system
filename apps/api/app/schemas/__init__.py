@@ -655,7 +655,18 @@ class QuoteOut(ORMBase):
     id: UUID
     project_id: UUID
     code: str
+    # ⚠ version 是**乐观锁计数器**（每次写库 +1），不是给用户看的版本号 ✗。
     version: int
+    # 业务版本（2026-10-08 用户反馈「只选了一台录像机就 V9」）：
+    #   「版本」= 这张单**被人保存为第几版**（人点「保存并重算」/提交/批准/手动存档）✓。
+    #   展示用**时间标记** ✓（2026-10-08 用户补充：「版本号以时间为标记」✓）：
+    #   `latest_revision_at` = 最新一版快照的 created_at（UTC，前端按浏览器本地时区显示）✓。
+    #   没保存过 → None / 0 → 界面显示「—」✓，不显示数字 ✓。
+    #   seq 仍保留 ✓：版本排序、两版对比、追溯都要用它 ✓（不该拿去当"版本号"展示 ✗）。
+    #   由 services.revisions.attach_revision_stats 挂上（瞬态属性，一次 group by ✓）。
+    revision_count: int = 0
+    latest_revision_seq: int = 0
+    latest_revision_at: datetime | None = None
     title: str
     status: QuoteStatus
     # 本单自定义的说明条款 / 有效期（null = 用系统设置里那份）

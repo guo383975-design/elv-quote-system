@@ -1644,6 +1644,256 @@ async def test_submit_and_approve_record_versions(client: AsyncClient, admin_hea
     assert Decimal(str(first["totals"]["total_with_tax"])) > 0, first
 
 
+async def test_quote_exposes_business_version_not_lock_counter(
+    client: AsyncClient, admin_headers
+) -> None:
+    """界面上那个「版本」= 业务版本（人保存为第几版），**不是**乐观锁计数器。
+
+    2026-10-08 用户反馈：「新建了慈溪门卫录像机，就选了一个录像机版本号就 V9 了」。
+    真因是展示层读了 `quotes.version`（每次写库 +1 的乐观锁计数器）✗；
+    生产实证：该单 `quote_revisions` 只有 2 行，`quotes.version` 却是 9 ✓。
+
+    这里把两套数**同时**钉住，避免以后又混起来：
+      · `revision_count` / `latest_revision_at` 只在"人保存一版"时才动 ✓；
+      · `version`（乐观锁）该涨照涨 ✓ —— 别为了修显示把并发控制改坏 ✗。
+    """
+    q = await _quote_with_items(client, admin_headers, "QT-VER-1", [])
+    # 刚建单：一次版本快照都没有 → 0/None（界面显示「—」），乐观锁计数器从 1 起步
+    assert q["version"] == 1, q
+    assert q["latest_revision_seq"] == 0, q
+    assert q["revision_count"] == 0, q
+    assert q["latest_revision_at"] is None, q
+
+    detail = (await client.get(f"/api/v1/quotes/{q['id']}", headers=admin_headers)).json()
+    assert detail["revision_count"] == 0, detail
+    assert detail["latest_revision_at"] is None, detail
+
+    # 「就选了一台录像机」= 加一行明细：只有乐观锁计数器前进，业务版本仍是"未保存"
+    r = await client.post(
+        f"/api/v1/quotes/{q['id']}/items", headers=admin_headers,
+        json={"name": "录像机", "quantity": "1", "unit_price": "2619",
+              "install_unit_price": "0"},
+    )
+    assert r.status_code == 201, r.text
+    after_add = (await client.get(f"/api/v1/quotes/{q['id']}", headers=admin_headers)).json()
+    assert after_add["version"] > q["version"], after_add      # 乐观锁照旧前进 ✓
+    assert after_add["revision_count"] == 0, after_add         # 业务版本不动 ✓
+    assert after_add["latest_revision_at"] is None, after_add
+
+    # 改费率（PATCH，顺带 _recompute）：计数器又 +1，业务版本仍然不动 ✓
+    assert (
+        await client.patch(
+            f"/api/v1/quotes/{q['id']}", headers=admin_headers, json={"tax_rate": "0.12"}
+        )
+    ).status_code == 200
+    after_rate = (
+        await client.get(f"/api/v1/quotes/{q['id']}", headers=admin_headers)
+    ).json()
+    assert after_rate["version"] > after_add["version"], after_rate
+    assert after_rate["revision_count"] == 0, after_rate
+    assert after_rate["latest_revision_at"] is None, after_rate
+
+    # 列表接口（项目列表的「版本」列读它）也要带上这几个字段
+    page = (
+        await client.get(
+            "/api/v1/quotes", headers=admin_headers, params={"keyword": "QT-VER-1"}
+        )
+    ).json()
+    row = next(x for x in page["items"] if x["id"] == q["id"])
+    assert row["revision_count"] == 0, row
+    assert row["latest_revision_at"] is None, row
+    assert row["version"] == after_rate["version"], row
+
+    # 「保存当前版本」一次 → 落一版，且**带上了时间标记** ✓
+    assert (
+        await client.post(f"/api/v1/quotes/{q['id']}/revisions", headers=admin_headers)
+    ).status_code == 201
+    v1 = (await client.get(f"/api/v1/quotes/{q['id']}", headers=admin_headers)).json()
+    assert v1["latest_revision_seq"] == 1, v1
+    assert v1["revision_count"] == 1, v1
+    assert v1["latest_revision_at"] is not None, v1
+
+    # 再保存一次 → 第 2 版 ✓
+    assert (
+        await client.post(f"/api/v1/quotes/{q['id']}/revisions", headers=admin_headers)
+    ).status_code == 201
+    v2 = (await client.get(f"/api/v1/quotes/{q['id']}", headers=admin_headers)).json()
+    assert v2["latest_revision_seq"] == 2, v2
+    assert v2["revision_count"] == 2, v2
+    # 到此业务版本 = 2，而乐观锁计数器更大 —— 两个数**相互独立** ✓：
+    #   · 存版本只落快照、不改单内容 → **不**推计数器 ✓（推了会无端顶掉别人的 version✗）
+    #   · 加明细 / 改费率推计数器 → 业务版本一动不动 ✓
+    assert v2["version"] > v2["latest_revision_seq"], v2
+
+
+async def test_save_and_compute_creates_revision_incidental_writes_do_not(
+    client: AsyncClient, admin_headers
+) -> None:
+    """★ 关键守卫：**人点「保存并重算」才落版本**；后台自动写库一律不落。
+
+    2026-10-08 用户要求「每次保存并重算就应该生成一个版本，方便追溯，版本号以时间为标记」，
+    同时**不能**回到上一个投诉的"选一台录像机涨一格"✗。所以这条把两边都钉住：
+
+      · `POST /quotes/{id}/compute`（界面「保存并重算」）→ 落一版 ✓
+      · 加明细 / 改数量 / 改单价 / 删行 / 改费率（PATCH）→ **一版都不落** ✓
+
+    这是本次改动最容易写错的地方：一旦把落版本塞进 `_recompute()`，
+    上面那些"顺带重算"就会全部开始造版本 ✗（用户会立刻再投诉一次）。
+    """
+    q = await _quote_with_items(client, admin_headers, "QT-REV-SAVED", [])
+    qid = q["id"]
+
+    async def snap() -> dict:
+        return (await client.get(f"/api/v1/quotes/{qid}", headers=admin_headers)).json()
+
+    before = await snap()
+    assert before["revision_count"] == 0 and before["latest_revision_at"] is None, before
+
+    # ① 加一行明细（= 用户说的"就选了一台录像机"）
+    r = await client.post(
+        f"/api/v1/quotes/{qid}/items", headers=admin_headers,
+        json={"name": "录像机", "quantity": "1", "unit_price": "2619",
+              "install_unit_price": "0"},
+    )
+    assert r.status_code == 201, r.text
+    item_id = r.json()["id"]
+    s = await snap()
+    assert s["revision_count"] == 0, s
+    assert s["version"] > before["version"], s        # 乐观锁照旧自增 ✓
+
+    # ② 改数量
+    assert (await client.patch(
+        f"/api/v1/quotes/{qid}/items/{item_id}", headers=admin_headers,
+        json={"quantity": "3"},
+    )).status_code == 200
+    s = await snap()
+    assert s["revision_count"] == 0, s
+
+    # ③ 改单价
+    assert (await client.patch(
+        f"/api/v1/quotes/{qid}/items/{item_id}", headers=admin_headers,
+        json={"unit_price": "2500"},
+    )).status_code == 200
+    s = await snap()
+    assert s["revision_count"] == 0, s
+
+    # ④ 改费率（PATCH → 顺带 _recompute）
+    assert (await client.patch(
+        f"/api/v1/quotes/{qid}", headers=admin_headers, json={"tax_rate": "0.12"},
+    )).status_code == 200
+    s = await snap()
+    assert s["revision_count"] == 0, s
+
+    # ⑤ 删行
+    assert (await client.delete(
+        f"/api/v1/quotes/{qid}/items/{item_id}", headers=admin_headers,
+    )).status_code in (200, 204)
+    no_versions = await snap()
+    assert no_versions["revision_count"] == 0, no_versions
+    assert no_versions["latest_revision_at"] is None, no_versions
+
+    # ⑥ 人点「保存并重算」→ 这才该落一版 ✓，并且带上时间标记 ✓
+    assert (await client.post(
+        f"/api/v1/quotes/{qid}/compute", headers=admin_headers, json={},
+    )).status_code == 200
+    saved = await snap()
+    assert saved["revision_count"] == 1, saved
+    assert saved["latest_revision_at"] is not None, saved
+
+    rows = (await client.get(f"/api/v1/quotes/{qid}/revisions", headers=admin_headers)).json()
+    assert [r["reason"] for r in rows] == ["saved"], rows
+
+
+async def test_save_and_compute_skips_identical_snapshot(
+    client: AsyncClient, admin_headers
+) -> None:
+    """什么都没改就再点一次「保存并重算」→ 不造重复版本（用户 2026-10-08 确认的口径 ✓）。
+
+    理由：用户要的是**可追溯** ✓，同一份内容堆一串只差几分钟的空版本只会让历史更难读 ✗。
+    内容真变了 → 一定落新版 ✓（下面第二段就是这条）。
+    """
+    q = await _quote_with_items(
+        client, admin_headers, "QT-REV-DEDUP",
+        [{"name": "摄像机", "quantity": "2", "unit_price": "500", "install_unit_price": "0"}],
+    )
+    qid = q["id"]
+    items = (await client.get(f"/api/v1/quotes/{qid}/items", headers=admin_headers)).json()
+    item_id = items[0]["id"]
+
+    async def count() -> int:
+        d = (await client.get(f"/api/v1/quotes/{qid}", headers=admin_headers)).json()
+        return d["revision_count"]
+
+    # 第一次保存并重算 → 1
+    assert (await client.post(f"/api/v1/quotes/{qid}/compute", headers=admin_headers,
+                              json={})).status_code == 200
+    assert await count() == 1
+    first_at = (await client.get(f"/api/v1/quotes/{qid}", headers=admin_headers)).json()[
+        "latest_revision_at"
+    ]
+
+    # 内容没变，再点一次 → 仍是 1（跳过重复快照 ✓）
+    assert (await client.post(f"/api/v1/quotes/{qid}/compute", headers=admin_headers,
+                              json={})).status_code == 200
+    assert await count() == 1
+
+    # 改点东西（数量）再点 → 落第 2 版 ✓，且时间标记跟着更新 ✓
+    assert (await client.patch(
+        f"/api/v1/quotes/{qid}/items/{item_id}", headers=admin_headers,
+        json={"quantity": "5"},
+    )).status_code == 200
+    # ⚠ 等一下再存：`quote_revisions.created_at` 的默认值是 **DB 的 CURRENT_TIMESTAMP**
+    #   （models/quote_revision.py:48），SQLite 上只有**秒**精度 ✓ ——
+    #   同一秒内落的两版时间戳会一模一样，断言"时间标记更新了"就会假失败 ✗。
+    #   生产是 PG（微秒精度 ✓），不需要等；这里只为让断言在 SQLite 上也有区分力 ✓。
+    import asyncio
+
+    await asyncio.sleep(1.1)
+    assert (await client.post(f"/api/v1/quotes/{qid}/compute", headers=admin_headers,
+                              json={})).status_code == 200
+    assert await count() == 2
+    second_at = (await client.get(f"/api/v1/quotes/{qid}", headers=admin_headers)).json()[
+        "latest_revision_at"
+    ]
+    # 时间标记必须跟着**最新一版**走（取 min / 取第一版都会在这里露馅 ✓）
+    assert second_at and first_at and second_at > first_at, (first_at, second_at)
+
+    reasons = [
+        r["reason"]
+        for r in (
+            await client.get(f"/api/v1/quotes/{qid}/revisions", headers=admin_headers)
+        ).json()
+    ]
+    assert reasons == ["saved", "saved"], reasons
+
+
+async def test_patch_response_carries_business_version(
+    client: AsyncClient, admin_headers
+) -> None:
+    """提交/批准落版后，PATCH 的响应里「第几版」要立刻跟上。
+
+    前端在一次流转后可能直接用响应更新界面（不重拉详情），响应里的业务版本
+    停在 0 的话，刚提交完反而显示「未保存版本」✗。
+    """
+    q = await _quote_with_items(client, admin_headers, "QT-VER-2", [])
+    r = await client.patch(
+        f"/api/v1/quotes/{q['id']}", headers=admin_headers, json={"status": "submitted"}
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["latest_revision_seq"] == 1, body
+    assert body["revision_count"] == 1, body
+
+    r2 = await client.patch(
+        f"/api/v1/quotes/{q['id']}", headers=admin_headers, json={"status": "reviewing"}
+    )
+    assert r2.status_code == 200, r2.text
+    # 只是流转状态（没落新版）：业务版本仍是 1，计数器照涨 ✓
+    body2 = r2.json()
+    assert body2["latest_revision_seq"] == 1, body2
+    assert body2["version"] > body["version"], body2
+
+
 async def test_manual_revision_and_diff_shows_price_change(
     client: AsyncClient, admin_headers
 ) -> None:

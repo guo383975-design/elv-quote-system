@@ -324,6 +324,8 @@ const REASON_LABEL: Record<string, string> = {
   submitted: '提交审核',
   approved: '批准',
   manual: '手动存档',
+  // 2026-10-08 新增：人点「保存并重算」落的那一版 ✓
+  saved: '保存并重算',
 }
 
 async function openRevisions(): Promise<void> {
@@ -336,6 +338,19 @@ async function loadRevisions(): Promise<void> {
   revLoading.value = true
   try {
     revisions.value = await quoteApi.revisions(quoteId.value)
+    // 顺手把「业务版本」同步到本地 quote（2026-10-08）：
+    //   revisions 是权威来源 ✓，刚点过「保存并重算」/「保存当前版本」时
+    //   GET /quotes 还没重拉 ✓，不同步的话本地那份会停在旧值 ✗。
+    if (quote.value) {
+      quote.value.revision_count = revisions.value.length
+      quote.value.latest_revision_seq = revisions.value.length
+        ? Math.max(...revisions.value.map((r) => r.seq))
+        : 0
+      // 展示口径是**时间标记**：取最新一版的 created_at（列表已按 seq 倒序 ✓）
+      quote.value.latest_revision_at = revisions.value.length
+        ? revisions.value[0].created_at
+        : null
+    }
     // 默认比"最近两版"，用户最常看的就是这个
     if (revisions.value.length >= 2) {
       revTo.value = revisions.value[0].seq

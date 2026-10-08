@@ -640,8 +640,29 @@ async function openSubsystems(row: Project): Promise<void> {
                     </el-tag>
                   </template>
                 </el-table-column>
-                <el-table-column label="版本" width="70">
-                  <template #default="{ row: q }">v{{ q.version }}</template>
+                <!-- 版本 = **业务版本的时间标记** ✓（人点「保存并重算」/提交/批准/手动存档
+                     才存一版，用户要求「版本号以时间为标记」✓）。
+                     ⚠ 以前这里渲染的是 q.version，那是**乐观锁计数器** ✗ ——
+                     每次写库都 +1（加明细/改数量/算价/流转），于是刚建的单
+                     "只选了一台录像机"就显示 v9 ✗（2026-10-08 用户反馈的真因 ✓）。
+                     没保存过 → 显示「—」✓，不再出现数字 ✓。 -->
+                <el-table-column label="版本" width="130">
+                  <template #default="{ row: q }">
+                    <el-tooltip
+                      v-if="q.latest_revision_at"
+                      :content="`最近一次保存的版本：${dateTime(q.latest_revision_at)}（共 ${q.revision_count ?? 1} 个版本快照）`"
+                      placement="top"
+                    >
+                      <span>{{ dateTime(q.latest_revision_at) }}</span>
+                    </el-tooltip>
+                    <el-tooltip
+                      v-else
+                      content="还没有保存过版本（点「保存并重算」/ 提交审核 / 批准 / 「保存当前版本」才会存一版）"
+                      placement="top"
+                    >
+                      <span class="text-muted">—</span>
+                    </el-tooltip>
+                  </template>
                 </el-table-column>
                 <el-table-column label="状态" width="100">
                   <template #default="{ row: q }">

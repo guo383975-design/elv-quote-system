@@ -692,7 +692,7 @@ def _title_flowables(ctx: ExportContext, theme: _Theme) -> list[Any]:
         if contact:
             parts.append(Paragraph(_esc(contact), theme.note))
     parts.append(Paragraph(_esc(meta.title or "报价单"), theme.title))
-    bits = [bit for bit in (meta.quote_code, f"V{meta.version}" if meta.version else "",
+    bits = [bit for bit in (meta.quote_code, meta.version_label or "",
                             meta.status_label) if bit]
     if bits:
         parts.append(Paragraph(_esc(" · ".join(bits)), theme.subtitle))
@@ -703,8 +703,11 @@ def _title_flowables(ctx: ExportContext, theme: _Theme) -> list[Any]:
 def _info_flowables(ctx: ExportContext, theme: _Theme) -> list[Any]:
     """报价单/项目/客户信息块 —— 两列网格（每行两组「标签 + 值」）。"""
     meta = ctx.meta
+    # 版本 = **业务版本的时间标记**（2026-10-08 用户要求「版本号以时间为标记」）✓。
+    # 没保存过任何一版时**整项省略** ✓：印一个「V—」比不印更让人误解 ✗。
+    version_pair = ("版本", meta.version_label) if meta.version_label else ("", "")
     pairs: list[tuple[str, str, str, str]] = [
-        ("报价单号", meta.quote_code, "版本", f"V{meta.version}"),
+        ("报价单号", meta.quote_code, *version_pair),
         ("项目编号", meta.project_code, "项目名称", meta.project_name),
         ("客户名称", meta.customer_name, "联系人", meta.customer_contact),
         ("联系电话", meta.customer_phone, "工程地址", meta.address),

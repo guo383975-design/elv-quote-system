@@ -455,7 +455,27 @@ export interface Quote {
   id: string
   project_id: string
   code: string
+  /**
+   * ⚠ **乐观锁计数器**，不是给用户看的版本号（每次写库 +1：加明细/改数量/
+   * 算价/流转状态都会涨）。**不要**再把它渲染成「V{n}」✗ ——
+   * 2026-10-08 用户反馈「新建的单只选了一台录像机就 V9」的真因就是它。
+   */
   version: number
+  /**
+   * **业务版本**（2026-10-08）：这张单被人保存出来的最新一版。
+   * 展示口径 = **时间标记**（用户要求「版本号以时间为标记」）：
+   * 用 `latest_revision_at`（ISO，UTC）经 `dateTime()` 按浏览器本地时区显示；
+   * `null` = 一次都没保存过 → 界面显示「—/未保存版本」。
+   * 由后端 `GET /quotes` / `GET /quotes/{id}` 随响应返回。
+   */
+  latest_revision_at?: string | null
+  /** 保存过的版本快照条数（`quote_revisions` 行数）；0 = 没保存过。 */
+  revision_count?: number
+  /**
+   * 最新一版的 `seq`。**内部用**（版本历史排序 / 两版对比 / 追溯）✓，
+   * 不再作为"版本号"展示 ✗（用户要的是时间标记 ✓）。
+   */
+  latest_revision_seq?: number
   title: string
   status: QuoteStatus
   /** 本单自定义的说明条款 / 有效期（null = 用系统设置里那份） */

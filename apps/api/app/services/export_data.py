@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from app.core.labels import label_of
 from app.services.quote_terms import build_variables, render_clauses
@@ -61,7 +62,11 @@ class ExportMeta:
 
     quote_code: str
     title: str
-    version: int
+    # **业务版本的时间标记**（2026-10-08 用户要求「版本号以时间为标记」）✓：
+    #   形如 `2026-10-08 15:33`；**空串 = 一次都没保存过 → 导出的信息表里省略这一项** ✓。
+    # ⚠ 绝不能填 quotes.version ✗ —— 那是乐观锁计数器（每次写库 +1）✗，
+    #   生产实证：某单业务上只有 2 版、计数器却已经 9 ✓，印在给甲方的报价单上就是错数 ✗。
+    version_label: str
     status_label: str
     project_code: str
     project_name: str
@@ -445,6 +450,37 @@ def _quote_date(quote: Any) -> str:
         return str(created)[:10]
 
 
+# 「版本」在导出件上印成**时间标记**（2026-10-08 用户要求「版本号以时间为标记」）✓。
+#
+# 时区为什么不用 `astimezone()`：这台生产服务器的 TZ 是 **UTC**（timedatectl = Etc/UTC）✓，
+# 而客户在 +08 时区 —— 直接 astimezone() 会把 16:33 那次保存印成 08:33 ✗，
+# 与界面（浏览器按本地时区渲染 ✓）显示成两个数 ✗。所以这里固定按产品的服务时区
+#（与客户看的界面一致 ✓）换算；将来真要多时区部署，改这一个常量即可 ✓。
+# ⚠ 取不到 tzdata 时必须**能降级**而不是崩 ✗：开发机上（Windows / 精简镜像）没有
+#   /usr/share/zoneinfo，`ZoneInfo(...)` 会抛 ZoneInfoNotFoundError —— 那会让
+#   `import app.main` 直接失败、整个应用起不来 ✗（比"时间显示差 8 小时"严重得多 ✓）。
+try:
+    _VERSION_TZ: ZoneInfo | None = ZoneInfo("Asia/Shanghai")
+except Exception:  # noqa: BLE001 —— 任何取不到时区库的原因都降级
+    _VERSION_TZ = None
+
+
+def version_label_of(quote: Any) -> str:
+    """最新一版快照的**时间标记**（YYYY-MM-DD HH:mm，服务时区）。
+
+    一次都没保存过 → 空串 ✓（导出件里**省略**版本这一项 ✓，不能印「V—」/「V0」✗）。
+    """
+    at = getattr(quote, "latest_revision_at", None)
+    if at is None:
+        return ""
+    try:
+        # _VERSION_TZ 为 None（拿不到 tzdata）时 astimezone(None) = 服务器本地时区，
+        # 与"生成时间"那一栏同口径，至少不会自相矛盾 ✓。
+        return at.astimezone(_VERSION_TZ).strftime("%Y-%m-%d %H:%M")
+    except (AttributeError, ValueError, OSError):  # 拿脏值也不能让导出 500
+        return ""
+
+
 def _valid_until(quote: Any, valid_days: int = QUOTE_VALID_DAYS) -> str:
     """有效期至 = 报价日期 + 有效期天数（默认 30 天，可在「系统设置」里改）。"""
     created = getattr(quote, "created_at", None)
@@ -565,7 +601,8 @@ def build_context(
     meta = ExportMeta(
         quote_code=_s(getattr(quote, "code", "")),
         title=_s(getattr(quote, "title", "")),
-        version=int(getattr(quote, "version", 1) or 1),
+        # 业务版本的时间标记（由调用方 attach_revision_stats 挂上）；没保存过 → 空串 ✓
+        version_label=version_label_of(quote),
         status_label=label_of("quote_status", getattr(quote, "status", "")),
         project_code=_s(getattr(project, "code", "")),
         project_name=_s(getattr(project, "name", "")),

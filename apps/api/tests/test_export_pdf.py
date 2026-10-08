@@ -32,7 +32,7 @@ def _meta(**overrides) -> ExportMeta:
     base: dict = {
         "quote_code": "QT-2026-0001",
         "title": "宁波某园区智能化弱电工程报价单",
-        "version": 3,
+        "version_label": "2026-10-08 15:33",
         "status_label": "已审核",
         "project_code": "PRJ-2026-0007",
         "project_name": "宁波北仑某园区智能化改造工程",

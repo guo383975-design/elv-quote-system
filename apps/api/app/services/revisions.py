@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from decimal import Decimal
 from typing import Any
 
@@ -115,6 +116,48 @@ def build_snapshot(quote: Quote, items_in: list | None = None) -> dict[str, Any]
 
 def build_totals(quote: Quote) -> dict[str, str]:
     return {f: _num(getattr(quote, f, 0)) for f in TOTAL_FIELDS}
+
+
+async def attach_revision_stats(db: AsyncSession, quotes: Sequence[Quote]) -> None:
+    """把**业务版本**挂到 Quote 实例上（瞬态属性：不落库、不改任何列）。
+
+    为什么需要这一步（2026-10-08 用户反馈的真因）：
+    `quotes.version` 是**乐观锁计数器** —— 每写一次库就 +1（加明细/改数量/算价/
+    流转状态…），它回答的是"这份数据有没有被别人动过"，**不是**"这是第几版" ✗。
+    展示层把它当版本号显示，于是新建的单"只选了一台录像机"就显示 V9 ✗
+    （生产实证：该单 `quote_revisions` 只有 2 行、`quotes.version`=9 ✓）。
+
+    真正的业务版本 = **人保存出来的第几版** = `quote_revisions.seq` 的最大值 ✓。
+    没保存过 → 0 → 展示层显示「—」，绝不显示计数器 ✓。
+
+    2026-10-08 用户补充：「版本号以时间为标记」✓ —— 所以这里同时挂上
+    **最新一版的 created_at**（`latest_revision_at` ✓），界面与导出件显示它 ✓；
+    `seq` 仍然保留 ✓（排序 / 对比 / 追溯要用 ✓）。
+
+    列表页一次 group by 查全部（不给前端留 N+1 ✗）。
+    """
+    ids = [q.id for q in quotes if getattr(q, "id", None) is not None]
+    stats: dict[Any, tuple[int, int, Any]] = {}
+    if ids:
+        rows = await db.execute(
+            select(
+                QuoteRevision.quote_id,
+                func.count(QuoteRevision.id),
+                func.coalesce(func.max(QuoteRevision.seq), 0),
+                func.max(QuoteRevision.created_at),
+            )
+            .where(QuoteRevision.quote_id.in_(ids))
+            .group_by(QuoteRevision.quote_id)
+        )
+        stats = {
+            quote_id: (int(count or 0), int(latest or 0), latest_at)
+            for quote_id, count, latest, latest_at in rows.all()
+        }
+    for q in quotes:
+        count, latest, latest_at = stats.get(getattr(q, "id", None), (0, 0, None))
+        q.revision_count = count
+        q.latest_revision_seq = latest
+        q.latest_revision_at = latest_at
 
 
 async def save_revision(
