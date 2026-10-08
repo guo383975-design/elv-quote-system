@@ -42,6 +42,7 @@ import type {
   ApprovalChain,
 } from '@/api/types'
 import { dateTime, dateTimeSec, money, percentInputToRatio, ratioToPercentInput, toNum } from '@/utils/format'
+import { computeSavedMessage } from '@/utils/computeMessage'
 import {
   effectiveValidDays,
   formatLocalDate,
@@ -896,7 +897,9 @@ async function saveAndCompute(): Promise<void> {
   try {
     const res = await quoteApi.compute(quoteId.value, ratePayload())
     warnings.value = res.warnings ?? []
-    ElMessage.success('已按当前费率重算')
+    // 提示要说清"这次到底存没存版本"（2026-10-08：compute 现在会落一版 ✓；
+    // 内容没变时按去重口径跳过 ✓ —— 见 utils/computeMessage.ts）
+    ElMessage.success(computeSavedMessage(res, '已按当前费率重算'))
     await reload()
   } catch (e) {
     ElMessage.error(extractErrorMessage(e))

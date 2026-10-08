@@ -40,6 +40,7 @@ import {
   toNum,
 } from '@/utils/format'
 import { downloadBlob } from '@/utils/download'
+import { computeSavedMessage } from '@/utils/computeMessage'
 import {
   effectiveValidDays,
   formatLocalDate,
@@ -405,7 +406,8 @@ async function saveAndCompute(): Promise<void> {
     warnings.value = res.warnings ?? []
     // 重算也把面板值写进了服务端，脏标记清掉
     ratesDirty.value = false
-    ElMessage.success('已按当前费率重算')
+    // 与工作台/人工费设置**同一口径** ✓（compute 现在会落一版，提示要说清 ✓）
+    ElMessage.success(computeSavedMessage(res, '已按当前费率重算'))
     await reload()
   } finally {
     computing.value = false

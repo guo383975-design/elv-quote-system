@@ -1103,6 +1103,15 @@ class ComputeResult(BaseModel):
     estimated_cost_amount: Decimal | None = None
     # 计价过程中的降级提示，例如「定额库未加载，定额口径已退化为安装费」
     warnings: list[str] = []
+    # ----- 本次「保存并重算」有没有落一版快照（2026-10-08 用户要求）-----
+    # 语义变了提示就得跟上 ✓：`POST /quotes/{id}/compute` 现在**会落一版**
+    # （reason=saved，见 api/v1/quotes.py），界面必须能说清"刚存了一版（时间）"✓，
+    # 而不是只回一句「已按当前费率重算」✗ —— 那样用户根本不知道存了版本 ✗。
+    # `revision_saved=False` = 内容与最新一版完全一致、按去重口径**跳过**了 ✓，
+    # 界面据此提示「内容未变化，未新增版本」✓，不许假装存了一版 ✗。
+    revision_saved: bool = False
+    revision_created_at: datetime | None = None
+    revision_count: int = 0
 
 
 # Resolve forward refs

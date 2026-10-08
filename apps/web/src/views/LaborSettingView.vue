@@ -28,6 +28,7 @@ import { laborApi, projectApi, quoteApi } from '@/api'
 import { extractErrorMessage } from '@/api/client'
 import type { CurrentLaborRates, Project, QuoteDetail } from '@/api/types'
 import { money, percentInputToRatio, ratioToPercentInput, toNum } from '@/utils/format'
+import { computeSavedMessage } from '@/utils/computeMessage'
 import { useAuthStore } from '@/stores/auth'
 import { useMetaStore } from '@/stores/meta'
 
@@ -182,7 +183,7 @@ async function save(): Promise<void> {
   }
   saving.value = true
   try {
-    await quoteApi.compute(quoteId.value, {
+    const res = await quoteApi.compute(quoteId.value, {
       version: quote.value.version,
       labor_float_rate: percentInputToRatio(overallPct.value),
       labor_float_per_class: {
@@ -191,7 +192,9 @@ async function save(): Promise<void> {
         class_c: percentInputToRatio(perClassPct.class_c),
       },
     })
-    ElMessage.success('人工费已保存并重算')
+    // 这一页的「保存」走的也是 POST /compute ✓ → 同样会落一版快照 ✓，
+    // 所以提示与工作台/报价编制页**同一口径** ✓（见 utils/computeMessage.ts）
+    ElMessage.success(computeSavedMessage(res, '人工费已重算'))
     await reload()
   } catch (e) {
     ElMessage.error(extractErrorMessage(e))

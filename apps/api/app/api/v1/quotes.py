@@ -315,6 +315,11 @@ def _compute_result(quote: Quote, user: User | None = None) -> ComputeResult:
             getattr(quote, "compute_estimated_amount", None) if show_cost else None
         ),
         warnings=list(getattr(quote, "compute_warnings", None) or []),
+        # 本次保存有没有落版（瞬态属性，由 compute 端点挂上 ✓）：
+        # 界面据此提示「已保存版本（时间）/ 内容未变化，未新增版本」✓
+        revision_saved=bool(getattr(quote, "revision_saved", False)),
+        revision_created_at=getattr(quote, "revision_created_at", None),
+        revision_count=int(getattr(quote, "revision_count", 0) or 0),
     )
 
 
@@ -1095,7 +1100,15 @@ async def compute(
     # `dedupe=True`：快照与最新一版完全一致（没改任何东西又点了一次）就跳过 ✓，
     #   不造"同一份内容的一堆时间戳"这种噪声版本 ✓（用户的诉求是**可追溯** ✓，
     #   重复的空版本只会让历史更难读 ✗）。内容有变 → 一定落新版 ✓。
-    await save_revision(db, quote, reason="saved", user=user)
+    rev = await save_revision(db, quote, reason="saved", user=user)
+    # 把「这次有没有落版 / 落的是哪一版」交给界面 ✓（语义变了，提示必须跟上 ✓）：
+    #   · rev 非 None → 刚落的这版就是最新一版，它的 created_at 取自
+    #     attach_revision_stats 的 max(created_at)（库侧值 ✓，不用 refresh →
+    #     避开 server_default 在 async 里触发的同步懒加载 MissingGreenlet ✗）；
+    #   · rev 为 None（去重跳过）→ 不给时间 ✗，界面提示「内容未变化，未新增版本」✓。
+    await attach_revision_stats(db, [quote])
+    quote.revision_saved = rev is not None
+    quote.revision_created_at = quote.latest_revision_at if rev is not None else None
     return _compute_result(quote, user)
 
 

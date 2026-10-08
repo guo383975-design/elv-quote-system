@@ -594,6 +594,16 @@ export interface ComputeResult {
   gross_profit_rate: Decimalish | null
   /** 计价降级提示，例如「定额库未加载，定额口径已退化为安装费」。 */
   warnings: string[]
+  /**
+   * 本次「保存并重算」有没有落一版快照（2026-10-08）。
+   * compute 现在会落版 ✓；内容与最新一版完全一致时按去重口径**跳过** ✓ →
+   * `false` 时提示要说「内容未变化，未新增版本」✓ 不能假装存了 ✓。
+   */
+  revision_saved?: boolean
+  /** 本次落库那一版的 `created_at`（被跳过时为 null）—— 提示里的时间取它 ✓。 */
+  revision_created_at?: string | null
+  /** 这单当前累计的版本快照数。 */
+  revision_count?: number
 }
 
 export interface QuoteCost {

@@ -1793,9 +1793,9 @@ async def test_save_and_compute_creates_revision_incidental_writes_do_not(
     assert no_versions["latest_revision_at"] is None, no_versions
 
     # ⑥ 人点「保存并重算」→ 这才该落一版 ✓，并且带上时间标记 ✓
-    assert (await client.post(
-        f"/api/v1/quotes/{qid}/compute", headers=admin_headers, json={},
-    )).status_code == 200
+    r6 = await client.post(f"/api/v1/quotes/{qid}/compute", headers=admin_headers, json={})
+    assert r6.status_code == 200, r6.text
+    assert r6.json()["revision_saved"] is True, r6.json()     # 提示要说「已保存版本（时间）」✓
     saved = await snap()
     assert saved["revision_count"] == 1, saved
     assert saved["latest_revision_at"] is not None, saved
@@ -1824,17 +1824,28 @@ async def test_save_and_compute_skips_identical_snapshot(
         d = (await client.get(f"/api/v1/quotes/{qid}", headers=admin_headers)).json()
         return d["revision_count"]
 
-    # 第一次保存并重算 → 1
-    assert (await client.post(f"/api/v1/quotes/{qid}/compute", headers=admin_headers,
-                              json={})).status_code == 200
+    # 第一次保存并重算 → 1：响应要**明确告诉界面"这次落了版 + 是哪一版"** ✓
+    # （语义变了提示就得跟上 ✓：界面的成功提示就靠这三个字段 ✓）
+    r1 = await client.post(f"/api/v1/quotes/{qid}/compute", headers=admin_headers, json={})
+    assert r1.status_code == 200, r1.text
+    b1 = r1.json()
+    assert b1["revision_saved"] is True, b1
+    assert b1["revision_created_at"], b1
+    assert b1["revision_count"] == 1, b1
     assert await count() == 1
     first_at = (await client.get(f"/api/v1/quotes/{qid}", headers=admin_headers)).json()[
         "latest_revision_at"
     ]
+    # 提示里的时间必须与详情里的最新一版一致 ✓（否则用户照提示去版本历史里对不上 ✗）
+    assert b1["revision_created_at"] == first_at, (b1["revision_created_at"], first_at)
 
-    # 内容没变，再点一次 → 仍是 1（跳过重复快照 ✓）
-    assert (await client.post(f"/api/v1/quotes/{qid}/compute", headers=admin_headers,
-                              json={})).status_code == 200
+    # 内容没变再点一次 → 仍是 1（跳过重复快照 ✓），且响应必须说清「没新增版本」✓
+    r2 = await client.post(f"/api/v1/quotes/{qid}/compute", headers=admin_headers, json={})
+    assert r2.status_code == 200, r2.text
+    b2 = r2.json()
+    assert b2["revision_saved"] is False, b2
+    assert b2["revision_created_at"] is None, b2
+    assert b2["revision_count"] == 1, b2
     assert await count() == 1
 
     # 改点东西（数量）再点 → 落第 2 版 ✓，且时间标记跟着更新 ✓
@@ -1849,8 +1860,10 @@ async def test_save_and_compute_skips_identical_snapshot(
     import asyncio
 
     await asyncio.sleep(1.1)
-    assert (await client.post(f"/api/v1/quotes/{qid}/compute", headers=admin_headers,
-                              json={})).status_code == 200
+    r3 = await client.post(f"/api/v1/quotes/{qid}/compute", headers=admin_headers, json={})
+    assert r3.status_code == 200, r3.text
+    assert r3.json()["revision_saved"] is True, r3.json()
+    assert r3.json()["revision_count"] == 2, r3.json()
     assert await count() == 2
     second_at = (await client.get(f"/api/v1/quotes/{qid}", headers=admin_headers)).json()[
         "latest_revision_at"
