@@ -45,3 +45,14 @@ desktop.ini
 # 真凭据文件（数据库口令/JWT 密钥）—— 只留在磁盘与服务器上，绝不入库
 deploy/api.env
 
+# ---- 交付包产物（几百 MB，走文件分发，不进 git ✗；构建脚本在 deploy/offline/）----
+报价系统_Docker离线包_*.tar.gz
+报价系统_Docker版_*.zip
+报价系统_源码包_*.zip
+报价系统_*_SHA256.txt
+deploy/offline/upgrade-backup-*/
+
+
+# 演练/验证留下的原始日志（含临时口令与令牌，留在本地看，不入库 ✗）
+.evidence/
+

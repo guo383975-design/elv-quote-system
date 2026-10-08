@@ -803,7 +803,9 @@ async def seed_point_templates(session) -> None:
         log.info("seeded {} point templates", made)
 
 
-async def main(reset: bool = False, demo_users: bool = False) -> None:
+async def main(
+    reset: bool = False, demo_users: bool = False, factory_only: bool = False
+) -> None:
     # 与 app.main 的 lifespan 同一道闸：production 下密钥不安全就别往下做，
     # 否则 deploy.sh 会在这一步"成功"，服务却在重启后拒绝启动。
     settings.validate_for_runtime()
@@ -816,7 +818,22 @@ async def main(reset: bool = False, demo_users: bool = False) -> None:
             # production 下默认不建演示账号：它们是已知口令（admin/admin12345 …），
             # 在生产库上跑一次 seed 就等于开了 5 个弱口令账号。
             # 注意：组织架构树**不**受这个开关影响（它是结构，不是凭据）。
-            allow_demo = demo_users or not settings.is_production
+            #
+            # factory_only（出厂装填模式，离线交付包 install.sh 用的就是这个）：
+            # 只写"系统能开工所必需的结构与基础库"——部门树、人工信息价、定额子目、
+            # 供应商、设备分类树、设备库、点位模板；**不建**演示项目/报价单，
+            # **不建**任何账号（哪怕 APP_ENV=development 也不建）。
+            # 交付给客户的系统必须是"可用的空系统"：装完没有任何业务数据，
+            # 第一个管理员由现场通过 BOOTSTRAP_TOKEN 建号流程创建 ✓
+            if factory_only:
+                allow_demo = False
+                log.info(
+                    "出厂装填模式（--factory-only）：只写初始化数据"
+                    "（部门/信息价/定额/供应商/设备分类/设备库/点位模板），"
+                    "**不建**演示项目与报价单，**不建**任何账号"
+                )
+            else:
+                allow_demo = demo_users or not settings.is_production
             departments = await seed_departments(session)
             n_users = await seed_users(
                 session, allow_create=allow_demo, departments=departments
@@ -826,13 +843,20 @@ async def main(reset: bool = False, demo_users: bool = False) -> None:
             suppliers = await seed_suppliers(session)
             categories = await seed_device_categories(session)
             n_devices = await seed_devices(session, suppliers, categories)
-            await seed_demo_project(session)
+            if factory_only:
+                log.info(
+                    "已跳过演示项目/报价单（出厂装填模式）——"
+                    "projects / quotes / quote_items 保持为空 ✓"
+                )
+            else:
+                await seed_demo_project(session)
             await seed_point_templates(session)
 
             log.info(
                 f"Seed 完成: 用户 +{n_users}, 人工信息价 +{n_rates}, "
                 f"定额子目 +{n_quota}, 设备 +{n_devices}, "
                 f"设备分类 {len(categories)} 个节点"
+                + ("（出厂装填模式）" if factory_only else "")
             )
     finally:
         await dispose_engine()
@@ -846,8 +870,23 @@ if __name__ == "__main__":
         action="store_true",
         help="即使 APP_ENV=production 也创建 5 个已知口令的演示账号（不推荐）",
     )
+    parser.add_argument(
+        "--factory-only",
+        action="store_true",
+        help=(
+            "出厂装填模式：只写初始化数据（部门/人工信息价/定额子目/供应商/"
+            "设备分类/设备库/点位模板），不建演示项目与报价单、不建任何账号。"
+            "离线交付包 install.sh 用的是这个模式 → 装完是「可用的空系统」"
+        ),
+    )
     args = parser.parse_args()
-    asyncio.run(main(reset=args.reset, demo_users=args.demo_users))
+    asyncio.run(
+        main(
+            reset=args.reset,
+            demo_users=args.demo_users,
+            factory_only=args.factory_only,
+        )
+    )
 
 
 
