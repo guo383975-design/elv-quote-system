@@ -234,6 +234,16 @@ async def register(
         raise HTTPException(status_code=409, detail="邮箱已注册")
 
     # 走到这里说明是空库 + 拿着引导令牌 → 第一个用户就是管理员
+    #
+    # must_change_password=True（2026-10-08 演练抓到的真缺陷）：
+    #   这一支的口令是**安装者设的初始口令**（create-admin.sh 用 ADMIN_PASSWORD
+    #   传进来），口径与 seed.py 建演示账号时一样 —— 属于"初始口令"，必须首次
+    #   登录就强制轮换。此前**没有**传这个字段，于是落到 models/user.py:55 的
+    #   默认 False；迁移 0039 里那句 `UPDATE ... WHERE username='admin'` 只对
+    #   "迁移当时已存在的行"生效，对全新库完全不起作用 →
+    #   create-admin.sh 结尾印的「首次登录会强制改口令」成了空承诺，
+    #   安装者设的初始口令永远不会被强制轮换。
+    #   前端 AppLayout.vue 就是按登录响应里的 must_change_password 弹阻塞对话框的。
     user = User(
         username=body.username,
         email=body.email,
@@ -243,6 +253,7 @@ async def register(
         role=Role.ADMIN,
         status=UserStatus.ACTIVE,
         is_superuser=True,
+        must_change_password=True,
     )
     db.add(user)
     await db.flush()

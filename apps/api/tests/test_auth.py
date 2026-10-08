@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.permissions import Action, Role, can, can_see_cost, visible_resources
+from app.models.user import User
 
 
 @pytest.mark.asyncio
@@ -147,6 +150,70 @@ async def test_register_closed_once_a_user_exists(
     )
     assert r.status_code == 403, r.text
     assert "已有用户" in r.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_admin_must_change_password(
+    client: AsyncClient, db: AsyncSession, bootstrap
+) -> None:
+    """引导注册出来的第一个管理员必须带「首次登录强制改口令」标记。
+
+    2026-10-08 离线包演练抓到的真缺陷：register 建 User 时没传
+    must_change_password，于是落到模型默认 False —— 而 create-admin.sh
+    结尾印的是「首次登录会强制改口令」。安装者设的初始口令因此永远不会被
+    强制轮换。这里从**两条**口径同时钉住，避免只改了一处又回归：
+      · 登录响应里的 must_change_password（前端就是按它弹阻塞对话框的）；
+      · 库里那一列本身。
+    （注册接口自己的响应体里**没有**这个字段 —— UserOut 不暴露它，这是对的，
+      不用去改 UserOut。）
+    """
+    r = await client.post(
+        "/api/v1/auth/register", json=_reg_body(bootstrap_token=bootstrap)
+    )
+    assert r.status_code == 201, r.text
+
+    r2 = await client.post(
+        "/api/v1/auth/login/json",
+        json={"username": "firstuser", "password": "first12345"},
+    )
+    assert r2.status_code == 200, r2.text
+    assert r2.json()["must_change_password"] is True, r2.text
+
+    row = await db.scalar(select(User).where(User.username == "firstuser"))
+    assert row is not None
+    assert row.must_change_password is True
+
+
+@pytest.mark.asyncio
+async def test_change_password_clears_must_change_flag(
+    client: AsyncClient, bootstrap
+) -> None:
+    """改完口令这个标记必须消失（否则对话框永远关不掉）。"""
+    r = await client.post(
+        "/api/v1/auth/register", json=_reg_body(bootstrap_token=bootstrap)
+    )
+    assert r.status_code == 201, r.text
+    tok = (
+        await client.post(
+            "/api/v1/auth/login/json",
+            json={"username": "firstuser", "password": "first12345"},
+        )
+    ).json()["access_token"]
+
+    r3 = await client.post(
+        "/api/v1/auth/change-password",
+        headers={"Authorization": f"Bearer {tok}"},
+        json={"old_password": "first12345", "new_password": "first54321"},
+    )
+    assert r3.status_code == 200, r3.text
+    assert r3.json()["must_change_password"] is False
+
+    r4 = await client.post(
+        "/api/v1/auth/login/json",
+        json={"username": "firstuser", "password": "first54321"},
+    )
+    assert r4.status_code == 200, r4.text
+    assert r4.json()["must_change_password"] is False, r4.text
 
 
 # ---------------------------------------------------------------------------
