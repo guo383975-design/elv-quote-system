@@ -18,6 +18,7 @@ from app.core.logging import get_logger
 from app.db.session import get_db
 from app.models.device import Device, DeviceCategory, DeviceCategoryNode, DeviceStatus
 from app.models.import_batch import ImportBatch, ImportKind, ImportStatus
+from app.models.supplier import Supplier
 from app.models.user import User
 from app.services.device_accessories import (
     fix_category_leaf,
@@ -37,6 +38,16 @@ from app.services.excel_io import (
     parse_inquiry_sheet,
 )
 from app.services.import_batch import record_batch
+from app.services.import_mapping import (
+    ColumnMappingReport,
+    device_is_usable,
+    find_inactive_supplier,
+    map_device_status,
+    match_replacement,
+    match_supplier,
+    normalize_model,
+    status_label,
+)
 from app.services.pricing import floor_from_cost
 
 router = APIRouter(prefix="/imports", tags=["批量导入"])
@@ -78,12 +89,16 @@ def _template_xlsx(
 
     from openpyxl import Workbook
 
+    from app.services.xlsx_safe import append_row
+
     wb = Workbook()
     ws = wb.active
     ws.title = sheet_name
-    ws.append(columns)
+    # append_row（而非 ws.append）：示例行可能来自现有数据，不能让
+    # 以 = 开头的字符串被 Excel 当公式求值（见 services/xlsx_safe.py）
+    append_row(ws, columns)
     if sample:
-        ws.append(sample)
+        append_row(ws, sample)
     for idx in range(1, len(columns) + 1):
         ws.column_dimensions[ws.cell(row=1, column=idx).column_letter].width = 16
     buffer = BytesIO()
@@ -169,6 +184,12 @@ async def preview_device_import(
     cat_nodes = await _load_category_nodes(db)
     enum_to_root = _enum_to_root_map(cat_nodes)
 
+    # 供应商索引（2026-10-09）：**只按名称匹配已有供应商** ✓，匹配不到就报告 ✓
+    # 绝不新建 ✗（源表里"厂家/代理商/集成商"混着写是常态 ✗）。
+    suppliers = list((await db.scalars(select(Supplier))).all())
+    # 三列（设备状态 / 供应商 / 替代型号）的映射统计：摆在明面上 ✓，不静默 ✗
+    column_report = ColumnMappingReport()
+
     for idx, r in enumerate(rows[: max(1, max_rows)], start=2):  # 表头占第 1 行
         # problems 决定这一行的级别（error/warn）；notes 只是给人看的提示，
         # 不影响级别 —— 以前两者混在一个 issues 里，于是"将新建分类"这种
@@ -251,6 +272,20 @@ async def preview_device_import(
             stat["discontinued"] += 1
             level = "warn" if level != "error" else level
 
+        # ---- 2026-10-09：这三列以前**认得出列名、却完全不落** ----
+        # ① 设备状态（源表词表 ≠ 系统枚举 → 查表映射；认不出按在售并**报告**）
+        # ② 供应商（按名称匹配已有供应商；没有则报告，**不自动新建**）
+        # ③ 替代型号（按型号匹配 `devices.replacement_id`；匹配不到就报告并跳过）
+        # ⚠ 与落库走**同一个** `_resolve_imported_columns` ✓（一处口径 ✓）：
+        #   预览说会挂供应商 / 会落停产状态，落库就必须真挂真落 ✓。
+        applied_status, matched_supplier, matched_replacement, col_notes = (
+            _resolve_imported_columns(
+                r, model=model, existing=existing, suppliers=suppliers,
+                report=column_report, self_device=dup,
+            )
+        )
+        notes.extend(col_notes)
+
         issues = problems + notes
         stat[{"ok": "ok", "warn": "warn", "error": "error"}[level]] += 1
         preview.append(
@@ -271,6 +306,16 @@ async def preview_device_import(
                 "reference_price": float(price) if price is not None else None,
                 "status_in_db": str(dup.status) if dup else None,
                 "existing_code": dup.code if dup else None,
+                # 落库会用的状态（源表值 + 映射结果）✓ —— 前端可以直接显示这两列 ✓
+                "status": str(applied_status),
+                "status_label": status_label(applied_status),
+                "status_in_file": str(r.get("status") or "").strip() or None,
+                "status_recognized": map_device_status(r.get("status"))[1],
+                # 供应商 / 替代型号：命中了就带上编码，没命中就是 None ✓（明细在 column_report ✓）
+                "supplier_id": str(matched_supplier.id) if matched_supplier else None,
+                "supplier_name": matched_supplier.name if matched_supplier else None,
+                "replacement_id": str(matched_replacement.id) if matched_replacement else None,
+                "replacement_code": matched_replacement.code if matched_replacement else None,
                 "level": level,
                 "issues": issues,
             }
@@ -291,6 +336,9 @@ async def preview_device_import(
         "unmapped": columns_info["unmapped"],
         "mapping": columns_info["columns"],
         "header_row": columns_info["header_row"],
+        # 设备状态 / 供应商 / 替代型号三列的映射报告（**预览就要能看见** ✓）：
+        # 哪些写法被映射、哪些没认出来、哪些供应商/替代型号在系统里不存在 ✓。
+        "column_report": column_report.to_dict(),
     }
 
 
@@ -306,6 +354,80 @@ def _compose_description(r: dict) -> str | None:
         parts.append(f"保卡类型：{extra}")
     text = "\n".join(p for p in parts if p)
     return text[:4000] or None
+
+
+def _resolve_imported_columns(
+    row: dict,
+    *,
+    model: str,
+    existing: dict[str, Device],
+    suppliers: list[Supplier],
+    report: ColumnMappingReport,
+    self_device: Device | None,
+) -> tuple[DeviceStatus, Supplier | None, Device | None, list[str]]:
+    """把源表的三列（设备状态 / 供应商 / 替代型号）解析成可以直接落库的值 ✓。
+
+    预览与落库**共用这一个实现** ✓（预览在 api/v1/imports.py 里逐行调它 ✓）：
+    两处各写一份的话，迟早出现"预览说会挂供应商、落库却没挂"✗
+    —— 这个坑在分类解析上已经踩过一次 ✗（见 services/device_category.py ✓）。
+
+    返回 `(状态, 供应商, 替代型号设备, 逐行说明)` ✓，并把统计记进 `report` ✓：
+      · 状态认不出 → 在售 + **计入未识别** ✓（绝不静默 ✗）；
+      · 供应商没匹配上 → None + 计入 missing/inactive ✓（**不自动新建** ✗）；
+      · 替代型号匹配不到 / 指向自己 / 已停用 → None + 计入报告 ✓（**不写进描述** ✗）。
+
+    `说明`（notes）是给人逐行看的 ✓（预览界面直接显示 ✓）；
+    数量统计在 `report` 里 ✓（落库时写进导入批次 ✓）。
+    """
+    notes: list[str] = []
+
+    raw_status = str(row.get("status") or "").strip()
+    applied_status, recognized = map_device_status(raw_status)
+    report.note_status(raw_status, applied_status)
+    if raw_status and not recognized:
+        notes.append(f"设备状态「{raw_status}」无法识别 → 按「{status_label(applied_status)}」导入")
+    elif applied_status != DeviceStatus.ON_SALE:
+        notes.append(f"设备状态：{status_label(applied_status)}")
+
+    raw_supplier = str(row.get("supplier") or "").strip()
+    supplier = match_supplier(raw_supplier, suppliers) if raw_supplier else None
+    inactive = (
+        find_inactive_supplier(raw_supplier, suppliers)
+        if raw_supplier and supplier is None
+        else None
+    )
+    report.note_supplier(raw_supplier, supplier, inactive)
+    if raw_supplier and supplier is None:
+        why = "已停用" if inactive else "在系统中不存在"
+        notes.append(f"供应商「{raw_supplier}」{why}，本次不挂接（不会自动新建）")
+
+    raw_replacement = str(row.get("replacement_model") or "").strip()
+    replacement = None
+    self_referenced = bool(raw_replacement) and (
+        normalize_model(raw_replacement) == normalize_model(model)
+    )
+    replacement_inactive = None
+    if raw_replacement and not self_referenced:
+        replacement = match_replacement(
+            raw_replacement,
+            existing.values(),
+            exclude_id=getattr(self_device, "id", None),
+        )
+        if replacement is not None and not device_is_usable(replacement):
+            # 停用的设备不能当替代品 ✓（否则配单时会换到一台已经不能买的型号 ✗）
+            replacement_inactive, replacement = replacement, None
+    report.note_replacement(raw_replacement, replacement, self_referenced=self_referenced)
+    if raw_replacement and replacement is None:
+        if self_referenced:
+            notes.append(f"替代型号「{raw_replacement}」就是本型号，忽略")
+        elif replacement_inactive is not None:
+            notes.append(
+                f"替代型号「{raw_replacement}」指向的 {replacement_inactive.code} 已停用，忽略"
+            )
+        else:
+            notes.append(f"替代型号「{raw_replacement}」不在设备库中，本次跳过（不写进描述）")
+
+    return applied_status, supplier, replacement, notes
 
 
 async def _link_licenses_to_hosts(db: AsyncSession) -> tuple[int, int]:
@@ -422,6 +544,10 @@ async def commit_device_import(
     error_rows: list[dict] = []
     cat_nodes = await _load_category_nodes(db)
     enum_to_root = _enum_to_root_map(cat_nodes)
+    # 供应商 / 三列映射报告（2026-10-09）：与预览**同一套规则** ✓
+    # （见 services/import_mapping.py ✓ —— 预览说会挂供应商，落库就得真挂上 ✓）
+    suppliers = list((await db.scalars(select(Supplier))).all())
+    column_report = ColumnMappingReport()
 
     for idx, r in enumerate(rows, start=2):
         name = (r.get("name") or "").strip()
@@ -486,28 +612,41 @@ async def commit_device_import(
             install = Decimal("0") if is_lic else Decimal(str(install_price_default))
 
         key = model.upper()
-        if key in existing:
-            if duplicate_policy == "skip":
-                skipped += 1
-                continue
-            if duplicate_policy == "overwrite":
-                d = existing[key]
-                d.name = name
-                d.brand = (r.get("brand") or "").strip() or d.brand
-                d.unit = (r.get("unit") or "台").strip() or d.unit
-                d.reference_price = price
-                if cost is not None:
-                    d.cost_price = cost
-                if install is not None:
-                    d.install_unit_price = install
-                if (r.get("description") or "").strip():
-                    d.description = (r.get("description") or "").strip()
-                # 分类也按导入内容更新（否则"改了分类重导一次"看起来成功了却没变）
-                d.category = category
-                d.category_id = category_id
-                updated += 1
-                continue
-            # new → fall through to insert
+        dup_device = existing.get(key)
+        if dup_device is not None and duplicate_policy == "skip":
+            # ⚠ 跳过的行**不进**映射报告 ✓：报告说的是"这一批**落库**的行是怎么处理的" ✓
+            #   （把没写进去的行也统计成"按在售导入了"，报告就是在撒谎 ✗）。
+            skipped += 1
+            continue
+        # 三列映射（2026-10-09）：与预览**同一套规则** ✓（见 _resolve_imported_columns ✓）。
+        # 覆盖（overwrite）与新增走**同一份解析结果** ✓ —— "改了状态/供应商重导一次"
+        # 必须真的生效 ✓，否则用户以为改好了其实没变 ✗。
+        applied_status, mapped_supplier, mapped_replacement, _col_notes = _resolve_imported_columns(
+            r, model=model, existing=existing, suppliers=suppliers,
+            report=column_report, self_device=dup_device,
+        )
+        if dup_device is not None and duplicate_policy == "overwrite":
+            d = dup_device
+            d.name = name
+            d.brand = (r.get("brand") or "").strip() or d.brand
+            d.unit = (r.get("unit") or "台").strip() or d.unit
+            d.reference_price = price
+            if cost is not None:
+                d.cost_price = cost
+            if install is not None:
+                d.install_unit_price = install
+            if (r.get("description") or "").strip():
+                d.description = (r.get("description") or "").strip()
+            # 分类也按导入内容更新（否则"改了分类重导一次"看起来成功了却没变）
+            d.category = category
+            d.category_id = category_id
+            # 设备状态 / 供应商 / 替代型号（2026-10-09）：同一条口径
+            d.status = applied_status
+            d.supplier_id = mapped_supplier.id if mapped_supplier else None
+            d.replacement_id = mapped_replacement.id if mapped_replacement else None
+            updated += 1
+            continue
+        # new（或 duplicate_policy="new"）→ 新增
 
         code = await _next_code(db, category, category_id=category_id)
         d = Device(
@@ -526,7 +665,12 @@ async def commit_device_import(
             # 设备底价规则（2026-10-05）：按成本价 × 1.35 派生（与建/改设备同一口径）
             min_price=floor_from_cost(cost if cost is not None else price * Decimal("0.75")),
             description=_compose_description(r),
-            status=DeviceStatus.ON_SALE,
+            # ⚠ 这里以前**硬编码 ON_SALE** ✗ —— 源表写"停产"也照当在售 ✗
+            #   （列名早就被 excel_io 认出来了 ✓，只是没人用 ✗）。现在走映射 ✓。
+            status=applied_status,
+            # 供应商 / 替代型号（2026-10-09）：源表有就落 ✓（按名称/型号匹配已有对象 ✓）
+            supplier_id=mapped_supplier.id if mapped_supplier else None,
+            replacement_id=mapped_replacement.id if mapped_replacement else None,
             is_owner_supplied=_truthy(r.get("is_owner_supplied")),
             moq=_as_int(r.get("moq"), 1),
             warranty_years=_as_int(r.get("warranty_years"), 2),
@@ -544,6 +688,9 @@ async def commit_device_import(
     linked_hosts = linked_lics = 0
     if link_accessories:
         linked_hosts, linked_lics = await _link_licenses_to_hosts(db)
+    # 三列映射报告（2026-10-09）：**进批次留档** ✓ ——
+    # 事后要能回答"这一批里有多少行状态认不出、被按在售导入了"✓（不能只活在响应里 ✗）
+    column_summary = column_report.to_dict()
     batch = await record_batch(
         db,
         kind=ImportKind.DEVICE,
@@ -561,12 +708,19 @@ async def commit_device_import(
             "created_categories": created_categories,
             "linked_hosts": linked_hosts,
             "linked_licenses": linked_lics,
+            # 设备状态 / 供应商 / 替代型号三列怎么处理的 ✓
+            "column_report": column_summary,
         },
     )
     log.info(
         f"设备库导入完成 by {user.username}（批次 {batch.batch_no}）: "
         f"新增 {created} 更新 {updated} 跳过 {skipped} 错误 {errors}"
         + (f"；新建分类 {len(created_categories)} 个" if created_categories else "")
+        + (
+            f"；状态未识别 {column_summary['unmatched_counts']['status_unrecognized']} 行"
+            if column_summary["unmatched_counts"]["status_unrecognized"]
+            else ""
+        )
     )
     return {
         "batch_no": batch.batch_no,
@@ -579,6 +733,9 @@ async def commit_device_import(
         # 自动挂靠结果（2026-10-05 固化）：授权按型号挂到同名主机下
         "linked_hosts": linked_hosts,
         "linked_licenses": linked_lics,
+        # 三列映射报告（2026-10-09）：与预览同形 ✓ —— 前端/事后都能看到
+        # "哪些状态词被映射、哪些认不出、哪些供应商与替代型号没匹配上" ✓。
+        "column_report": column_summary,
     }
 
 
