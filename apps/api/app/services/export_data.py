@@ -565,6 +565,18 @@ def _valid_until(quote: Any, valid_days: int = QUOTE_VALID_DAYS) -> str:
         return ""
 
 
+def _default_company_name() -> str:
+    """公司名称的**最终兜底** —— 与「系统设置」的 DEFAULT 是**同一个字面量** ✓。
+
+    ⚠ 刻意**不**在这里另抄一份「XX科技有限公司」✗：抄一份就等于给
+    "改默认公司名"留下第二个必须同步的地方 ✓（services/settings.py 开头就记着
+    这类"静默漂移"的教训 ✓）。所以从 DEFAULTS 里取 ✓。
+    """
+    from app.services.settings import DEFAULTS, K_COMPANY
+
+    return _s((DEFAULTS.get(K_COMPANY) or {}).get("name"))
+
+
 def _export_settings(
     settings: dict | None, settings_overrides: dict | None = None
 ) -> dict[str, Any]:
@@ -598,8 +610,20 @@ def _export_settings(
     variables = build_variables(
         quote, valid_days=valid_days, overrides=overrides.get("terms_override")
     )
+    # 公司抬头（2026-10-09）—— **全系统唯一的取值口径** ✓：
+    #   本单选的名字 → 系统设置 company.name（= XX科技）→ 默认常量 ✓
+    # ⚠ 这是本功能的命门：客户版 PDF / 内部版 PDF / Excel / 客户预览页 /
+    #   `export-clauses` 接口**必须都**从这里取 ✓。少一处就是"预览写着 A 公司、
+    #   导出件印着 B 公司"✗ —— 我们刚在「毛利泄露」上吃过"以为走了其实没走"的亏 ✗。
+    # ⚠ 绝不要拿 quotes.company_name **去查抬头库**再渲染 ✗：那样"改抬头库"
+    #   会追溯改写历史单据 ✗（用户硬约束 ✓）。存的就是名字本身，直接用 ✓。
+    company_name = (
+        _s(overrides.get("company_name"))
+        or _s(company.get("name"))
+        or _default_company_name()
+    )
     return {
-        "company_name": company.get("name") or "",
+        "company_name": company_name,
         "company_address": company.get("address") or "",
         "company_phone": company.get("phone") or "",
         "company_email": company.get("email") or "",
@@ -623,11 +647,17 @@ def _quote_overrides(quote: Any) -> dict:
 
     `terms_override`（2026-10-05）：每单可不同的 6 个条款数字 ✓
     （有效期/预付/验收/质保金/质保期/工期 ✓）。
+
+    `company_name`（2026-10-09）：本单选用的**公司抬头** ✓。
+    ⚠ 存的就是**公司名字符串本身** ✓（不是抬头库的下标 / id ✓）——
+    这是**天然快照**：改 / 删抬头库**不会**追溯改写已开出的报价单 ✓。
+    为 NULL = 回落「系统设置 → 公司名称」✓（老单行为完全不变 ✓）。
     """
     return {
         "terms_override": getattr(quote, "terms_override", None),
         "clauses": getattr(quote, "clauses_override", None),
         "valid_days": getattr(quote, "valid_days_override", None),
+        "company_name": getattr(quote, "company_name", None),
     }
 
 

@@ -120,6 +120,17 @@ class Quote(UUIDPKMixin, TimestampMixin, Base):
     #   渲染时：本单优先 → 全局兜底 ✓（services/quote_terms.build_variables ✓）
     terms_override: Mapped[dict[str, Any] | None] = mapped_column(JSONType, nullable=True)
 
+    # 本单选用的**公司抬头**（2026-10-09 用户要求）：有时要用别家公司抬头去报价 ✓。
+    #   ⚠ 存的是**当时选定的那个公司名字符串本身** ✓ —— 不是抬头库的下标/id ✓。
+    #     这是**天然快照**：以后改 / 删系统设置里的 `company.letterheads`，
+    #     **不会**追溯改写这张单 ✓（用户硬约束：「历史单据绝不能跟着变」✓）。
+    #   NULL / 空 = 用「系统设置 → 公司名称」（当前「XX科技有限公司」）✓
+    #     —— 老单一个字段没动，导出行为与加这个功能之前**完全一致** ✓。
+    #   只存公司**名称** ✓：地址 / 电话 / 邮箱 / 税号 / Logo / 盖章位一律不进这一列 ✓。
+    #   取值的**唯一收口**在 services/export_data.py 的 `_export_settings()` ✓
+    #   （客户版 PDF / 内部版 PDF / Excel / 客户预览页 / export-clauses 全走它 ✓）。
+    company_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
     # 批准时间（2026-10-04）：看板按它取"最新一版"与月度趋势。
     # 应用层写 datetime.now(UTC)（微秒精度）；靠 created_at 推断在秒级库里分不出先后。
     approved_at: Mapped[datetime | None] = mapped_column(

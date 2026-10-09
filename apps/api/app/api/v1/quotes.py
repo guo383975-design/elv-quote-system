@@ -432,6 +432,11 @@ async def create_quote(
             "design_rate", "warranty_rate", "training_fee", "mgmt_profit_rate",
             "labor_float_rate", "labor_float_per_class", "terms_override",
             "valid_days_override", "install_mode",
+            # 公司抬头（2026-10-09）✓：增项**沿用原单的抬头** ✓。
+            #   否则「主单用浙江某某公司报价、增项单却印XX科技」✗ —— 同一客户
+            #   收到的两份文件抬头不一致 ✓（静默发错 ✗，正是本功能要防的事 ✓）。
+            #   调用方显式传了 company_name 就以调用方为准 ✓（下面 `is None` 判断 ✓）。
+            "company_name",
         ):
             if data.get(_f) is None and getattr(_src, _f, None) is not None:
                 data[_f] = getattr(_src, _f)
@@ -1764,6 +1769,11 @@ async def quote_export_clauses(
             "valid_days": getattr(quote, "valid_days_override", None),
             # 每单条款数字（2026-10-05）✓：本单改过就用本单的 ✓
             "terms_override": getattr(quote, "terms_override", None),
+            # 公司抬头（2026-10-09）✓：**必须在这里传** ✓ ——
+            #   ⚠ 原来这里只传了条款三项 ✗，而下面直接返回 `s["company"]`
+            #   （= 只有系统设置 ✓）✗ ⇒ 本单选了别家抬头，**预览页仍显示XX科技** ✗
+            #   —— 典型的"以为走了收口、其实没走"✗（客户预览与导出件口径分叉 ✗）。
+            "company_name": getattr(quote, "company_name", None),
         },
     )
     return {
@@ -1777,7 +1787,11 @@ async def quote_export_clauses(
         # 供前端把"本单数字"填进输入框 ✓（未覆盖就是系统设置里的生效值 ✓）
         "terms_override": getattr(quote, "terms_override", None),
         "terms_overridden": exp["terms_overridden"],
-        "company": s["company"],
+        # 公司抬头（2026-10-09）✓：把 **exp 里算好的名称** 盖回 company.name ✓。
+        #   前端预览页读的就是 `company.name` ✓（QuotePreviewView 的封面/页眉 ✓）。
+        #   ⚠ 不要返回 `s["company"]` 原样 ✗ —— 那是"只有系统设置"，
+        #   本单选了别家抬头时预览就会印成XX科技 ✗。
+        "company": {**s["company"], "name": exp["company_name"]},
     }
 
 

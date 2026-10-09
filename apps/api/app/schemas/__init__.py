@@ -571,6 +571,10 @@ class QuoteCreate(BaseModel):
     # 增项来源（2026-10-05）：本单从哪张报价单增项而来 ✓
     #   带上它 → 自动复制原单的费率/条款与明细 ✓（归档单尤其需要这样增项 ✓）
     based_on_quote_id: UUID | None = None
+    # 建单时就能指定公司抬头（2026-10-09）✓；不传 = 用「系统设置 → 公司名称」✓。
+    #   ⚠ 增项（based_on_quote_id）会自动沿用原单的抬头 ✓ —— 见
+    #   api/v1/quotes.py create_quote 的「从原单复制」清单 ✓（显式传了就以调用方为准 ✓）。
+    company_name: str | None = Field(None, max_length=255)
     auxiliary_base: AuxiliaryBaseType = AuxiliaryBaseType.DEVICE
     auxiliary_rate: Decimal = Field(Decimal("0.06"), ge=RATE_MIN, le=RATE_MAX)
     design_rate: Decimal = Field(Decimal("0.02"), ge=RATE_MIN, le=RATE_MAX)
@@ -616,6 +620,10 @@ def _bounded_terms(value: dict[str, Decimal] | None) -> dict[str, Decimal] | Non
 class QuoteUpdate(BaseModel):
     # 单据级条款覆盖（2026-10-05）：传 null = 恢复用系统设置；
     # 支持 {valid_days} 之类变量，渲染时按本单生效值替换。
+    # 本单选用的公司抬头（2026-10-09）：传具体的公司名 = 本单用别家抬头 ✓；
+    #   传 null / 不传 = 回落「系统设置 → 公司名称」✓（老单行为不变 ✓）。
+    #   长度上限 255 与 models/quote.py 的列宽、与抬头库的单条上限一致 ✓。
+    company_name: str | None = Field(None, max_length=255)
     # 安装单价方式（2026-10-05 用户设计）：manual=手填；quota=套定额（基价自动填）
     install_mode: str | None = Field(None, pattern="^(manual|quota)$")
     clauses_override: list[str] | None = None
@@ -672,6 +680,11 @@ class QuoteOut(ORMBase):
     # 本单自定义的说明条款 / 有效期（null = 用系统设置里那份）
     clauses_override: list[str] | None = None
     valid_days_override: int | None = None
+    # 本单选用的公司抬头（2026-10-09）：null / 空 = 用「系统设置 → 公司名称」✓。
+    #   ⚠ 存的是**公司名字符串本身** ✓（不是抬头库的下标 / id ✓）——
+    #   天然快照：改 / 删抬头库**不会**追溯改写已开出的报价单 ✓。
+    #   前端「报价条款」弹窗的公司抬头下拉靠这个字段回填 ✓。
+    company_name: str | None = None
     customer_name: str | None = None
     customer_contact: str | None = None
     customer_phone: str | None = None
