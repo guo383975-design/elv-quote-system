@@ -98,13 +98,28 @@ async def _load_labor_rates(db: AsyncSession) -> dict[LaborClass, LaborRate]:
     return {r.labor_class: r for r in rows.all()}
 
 
-async def _recompute(db: AsyncSession, quote: Quote, *, actor_id: UUID | None = None) -> Quote:
+async def _recompute(
+    db: AsyncSession,
+    quote: Quote,
+    *,
+    actor_id: UUID | None = None,
+    bump_version: bool = True,
+    audit: bool = True,
+) -> Quote:
     """Run the fee waterfall and persist results.
 
     We explicitly re-read the item collection first: items added or deleted
     through ``quote_id=``/``db.delete()`` do not automatically update an
     already-loaded ``quote.items`` collection, which would silently compute
     totals from a stale list.
+
+    ``bump_version`` / ``audit`` 两个开关（2026-10-09 修 P1-4 时加 ✓）只为
+    **建单那一刻的首次定值**服务 ✓：`create_quote` 传 False ✓ ——
+      · `version` 是**乐观锁计数器** ✓，建单本来就该是 1 ✓（建单再加一次会让
+        客户端拿到 version=2、并在下一次提交时莫名 409 ✗）；
+      · 审计里「谁建的这张单」应当是**第一条** ✓（补一条 compute 会把它挤到第二条 ✓
+        且会让建单在审计里看起来多了 4 次写操作 ✗）。
+    其余调用点（改明细/改费率/保存并重算）**一律保持默认 True** ✓ 行为不变 ✓。
     """
     await db.flush()
     await db.refresh(quote, attribute_names=["items"])
@@ -174,7 +189,9 @@ async def _recompute(db: AsyncSession, quote: Quote, *, actor_id: UUID | None = 
     # 任何一次重算都推进版本号。
     # 重算的输入包含明细行，所以明细一改版本就该变，客户端手里的 version 才会
     # 失效 → 下一次提交得到 409 而不是静默覆盖别人的修改。
-    quote.version = int(quote.version or 1) + 1
+    # ⚠ 例外：**建单时的首次定值**不推进 ✗（bump_version=False ✓ 理由见 docstring ✓）。
+    if bump_version:
+        quote.version = int(quote.version or 1) + 1
 
     # 瞬态属性（非映射字段，不落库）：把定额退化之类的告警挂到 ORM 实例上，
     # 让 _compute_result 能一并回传给前端。否则「定额口径已退化为安装费」
@@ -190,20 +207,21 @@ async def _recompute(db: AsyncSession, quote: Quote, *, actor_id: UUID | None = 
     # 回写子系统小计
     await _rollup_subsystems(db, quote)
 
-    db.add(
-        quote_audit(
-            quote_id=quote.id,
-            quote_code=quote.code,
-            user_id=actor_id,
-            action=AuditAction.COMPUTE,
-            payload={
-                "total_with_tax": str(breakdown.total_with_tax),
-                "quota_total_with_tax": str(breakdown.quota_total_with_tax),
-                "item_count": len(items),
-                "warnings": breakdown.warnings,
-            },
+    if audit:
+        db.add(
+            quote_audit(
+                quote_id=quote.id,
+                quote_code=quote.code,
+                user_id=actor_id,
+                action=AuditAction.COMPUTE,
+                payload={
+                    "total_with_tax": str(breakdown.total_with_tax),
+                    "quota_total_with_tax": str(breakdown.quota_total_with_tax),
+                    "item_count": len(items),
+                    "warnings": breakdown.warnings,
+                },
+            )
         )
-    )
     await db.flush()
     return quote
 
@@ -520,6 +538,20 @@ async def create_quote(
         )
         _idmap: dict[UUID, UUID] = {}
         for _r in _rows:
+            # 逐字段核对 quote_items 的全部业务列（2026-10-09 ✓）：
+            #   · 拷：subsystem_id / device_id / name / brand / model / spec_text /
+            #         unit / quantity / unit_price / install_unit_price /
+            #         auxiliary_unit_price / cost_price / is_owner_supplied /
+            #         is_shielded / is_cat5e / is_ceiling / notes / sort_order / source
+            #   · 不拷（**派生**，由 _recompute → compute_quote 从上面重算 ✓）：
+            #         equipment_amount / install_amount ✗（拷进来反而可能带上源单旧值 ✗）
+            #   · 不拷（**本单特有**）：quote_id（=新单 ✓）/ parent_item_id（下面按
+            #         id 映射补 ✓）/ is_replaced + replaced_by_id ✗（指向源单同一张单
+            #         内的另一行 → 拷进来会留下一个指向别单行的悬空 id ✗）/
+            #         id, created_at, updated_at（主键与时间戳 ✓）
+            # ⚠ 这里曾经**漏拷 is_shielded** ✗ → 增项行的安装费静默少 1/1.20 = 16.7% ✗
+            #   （实测 240 → 200 ✓）；而 is_cat5e / is_ceiling 都在 ✓ ——
+            #   三个工艺系数里恰好多了一个，说明当时是**逐个写字段**漏的 ✗。
             _new = QuoteItem(
                 quote_id=quote.id,
                 subsystem_id=_r.subsystem_id,
@@ -535,6 +567,7 @@ async def create_quote(
                 install_unit_price=_r.install_unit_price,
                 auxiliary_unit_price=_r.auxiliary_unit_price,
                 is_owner_supplied=_r.is_owner_supplied,
+                is_shielded=_r.is_shielded,
                 is_cat5e=_r.is_cat5e,
                 is_ceiling=_r.is_ceiling,
                 notes=_r.notes,
@@ -552,6 +585,23 @@ async def create_quote(
                     _child.parent_item_id = _idmap[_r.parent_item_id]
         await db.flush()
         quote.based_on_quote_id = _src.id
+
+    # 建单**也要**跑一次费用瀑布（2026-10-09 修 P1-4）✓：
+    #   以前 create_quote 只落单头与明细 ✗，从不调 `_recompute` ✗ →
+    #   增项单建完就是「12 行明细、含税合计 0.00、设备费 0.00、安装费 0.00」✗
+    #   （生产 `PRJ-202610-0002-Q02` 实测就是这个形态 ✓），界面上看着像一张空单 ✗。
+    #   ⚠ 放在**明细复制之后**：这是唯一能保证"明细分录与单头合计同源"的位置 ✓
+    #     （重算走的就是 update/compute 那三条路径共用的 `_recompute` ✓ 口径一致 ✓）。
+    #   ⚠ 不会双计 ✗：`_recompute` 是**幂等重算**（从明细重推全部费用瀑布 ✓），
+    #     不是累加；明细写入后那条既有路径（add/update/delete item → recompute）
+    #     在本次建单里**还没有发生过** ✓，这里补的是"第一次"，不是"又一次" ✓。
+    #   ⚠ 空单也照样走 ✓：设备费/安装费/辅材/设计/维保按 0 计 ✓；
+    #     但**培训费是报价单级的一笔固定费用** ✓（与有没有明细无关 ✓）——
+    #     建单时若带了 training_fee，合计就是「训练费+管理费+税」那个数 ✓，
+    #     与点一次「保存并重算」的结果**完全一致** ✓（这正是本修复要的口径统一 ✓）。
+    #   ⚠ 两个开关都传 False ✓：建单**不推进乐观锁版本**（新建的单就该是 v1 ✓）、
+    #     **不补写 compute 留痕**（"谁建的这张单"必须是审计里的第一条 ✓）。
+    await _recompute(db, quote, actor_id=user.id, bump_version=False, audit=False)
 
     return quote
 
@@ -673,8 +723,13 @@ _ENUM_RATE_FIELDS = {
 def _assert_not_archived(quote: Quote) -> None:
     """归档单**不允许任何写入**（2026-10-08 补）。
 
+    覆盖的入口（2026-10-09 起）✓：
+      · `POST /quotes/{id}/compute`（改费率并重算）✓
+      · `DELETE /quotes/{id}`（整张单删除 ✓ 审计 E 线 P1-2 ✓）
     背景：_assert_editable 覆盖了「改内容」的入口 ✓，但 **POST /compute**（改费率并重算）
-    当时没调用它 ✗ → 归档单仍能通过接口改写费率 ✓（界面挡住了 ✓，接口没挡 ✗）。
+    当时没调用它 ✗ → 归档单仍能通过接口改写费率 ✓（界面挡住了 ✓，接口没挡 ✗）；
+    DELETE 同样漏了 ✗ → 归档单能被整张删掉 ✓、`quote_revisions` 随 0018 的
+    ON DELETE CASCADE 一起消失 ✗。归档即定稿，"定稿还能删"等于没有定稿 ✗。
     口径刻意**窄**：只挡 archived ✓；approved 保持既有流程（允许有权限的人退回草稿再改 ✓），
     与 _assert_not_archived_revert 的分工一致 ✓。
     """
@@ -1014,6 +1069,13 @@ async def delete_quote(
     quote = await db.get(Quote, quote_id)
     if not quote:
         raise HTTPException(status_code=404, detail="报价单不存在")
+    # ⚠ 归档单**不可删除**（2026-10-09 补，审计 E 线 P1-2）✗：
+    #   归档即定稿 ✓ —— 而定稿之后如果还能把整张单删掉 ✗，那"归档"就只剩一个状态字 ✗：
+    #   实测 DELETE 归档单 → 204 ✓，随后 GET → 404 ✓，且 `quote_revisions`
+    #   随 0018 的 ON DELETE CASCADE 一起消失 ✗，留痕里也只剩下"曾经导出过"这类碎片 ✗。
+    #   复用既有守卫 ✓（`_assert_not_archived` 抛 409 ✓ 文案同"归档即定稿"口径 ✓），
+    #   不再另写一份判定 ✗ —— 否则以后改文案就会出现两处不一致 ✗。
+    _assert_not_archived(quote)
     # H-10：先写一条删除留痕再删。外键是 SET NULL，所以这条记录会活下来，
     # subject_code 里存着单号 —— 事后查"谁删了哪张单"答得上来。
     db.add(

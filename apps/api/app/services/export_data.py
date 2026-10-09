@@ -344,6 +344,75 @@ def build_subsystem_rows(subsystems: Iterable[Any]) -> list[ExportSubsystemRow]:
     return out
 
 
+def build_quote_subsystem_rows(
+    items: Iterable[Any], subsystems: Iterable[Any], auxiliary_total: Any = 0
+) -> list[ExportSubsystemRow]:
+    """**本单**的子系统小计（2026-10-09 修 P2）✓。
+
+    为什么不能直接用 `subsystems[*].equipment_subtotal` ✗：
+    `build_subsystem_rows` 读的 `subsystems.equipment_subtotal / install_subtotal /
+    auxiliary_subtotal` 是**项目级**列 ✓（由 `quotes._rollup_subsystems` 按
+    **该项目全部报价单**聚合 ✓ 见 test_subsystem_rollup_covers_every_quote_of_the_project ✓）。
+
+    但导出件是**一张报价单一份文件** ✓：同一份文件里「报价汇总」与「报价明细」都是
+    这一张单的 ✓，只有「子系统汇总」按项目级列渲染 ✗ —— 于是一张**增项单**
+    （`based_on_quote_id` 把源单明细整份复制过来 ✓）导出时，
+    「子系统汇总」= 源单 + 增项 ✗（金额直接翻倍 ✗），
+    与同一页的「报价明细」自相矛盾 ✗。
+
+    正确语义：导出件里的每个数字都只描述**这一张报价单** ✓
+    —— 子系统汇总 = 本单明细按 subsystem_id 分组求和 ✓
+    （设备费/安装费直接取行上的 `equipment_amount / install_amount` ✓ 与「报价明细」
+     同源 ✓）+ 点位数 ✓ + 辅材费按本单各子系统 (设备费+安装费) 占比分摊 ✓
+    （辅材费是**报价单级**的一笔费用 ✓，没有逐行金额 ✓；分摊之和 = 本单辅材费 ✓
+     与「报价汇总」的辅材费一致 ✓）。
+    项目级视图仍然由 `quotes._rollup_subsystems` 维护 ✓，本函数**不改它** ✗。
+    """
+    cent = Decimal("0.01")
+    subs = ordered_subsystems(subsystems)
+    eq_sum: dict[str, Decimal] = {str(getattr(s, "id", "")): Decimal("0") for s in subs}
+    ins_sum = dict(eq_sum)
+    pts_sum = dict(eq_sum)
+
+    rows = list(items)
+    for it in rows:
+        sid = str(getattr(it, "subsystem_id", "") or "")
+        if sid not in eq_sum:
+            continue          # 没归子系统 / 归到已删子系统的行不进这张表（同 _rollup_subsystems）
+        eq_sum[sid] += Decimal(str(getattr(it, "equipment_amount", 0) or 0))
+        ins_sum[sid] += Decimal(str(getattr(it, "install_amount", 0) or 0))
+        pts_sum[sid] += Decimal(str(getattr(it, "quantity", 0) or 0))
+
+    base = sum((eq_sum[k] + ins_sum[k] for k in eq_sum), Decimal("0"))
+    aux_total = Decimal(str(auxiliary_total or 0))
+    out: list[ExportSubsystemRow] = []
+    for s in subs:
+        sid = str(getattr(s, "id", ""))
+        eq = eq_sum[sid].quantize(cent, rounding=ROUND_HALF_UP)
+        ins = ins_sum[sid].quantize(cent, rounding=ROUND_HALF_UP)
+        if eq + ins == 0:
+            continue                     # 全零子系统不上客户版 ✓（与项目级同一规则）
+        aux = (
+            (aux_total * (eq + ins) / base).quantize(cent, rounding=ROUND_HALF_UP)
+            if base > 0
+            else Decimal("0")
+        )
+        out.append(
+            ExportSubsystemRow(
+                seq=len(out) + 1,
+                name=_s(getattr(s, "custom_name", "")) or label_of(
+                    "subsystem_type", getattr(s, "subsystem_type", "")
+                ),
+                point_count=qty_text(int(pts_sum[sid])),
+                equipment=money(eq),
+                install=money(ins),
+                auxiliary=money(aux),
+                amount=money(eq + ins),
+            )
+        )
+    return out
+
+
 def _strip_model_prefix(name: str, model: str) -> str:
     """客户版显示名：若名称开头就是型号，则剥掉它（2026-10-05 ✓）。
 
@@ -576,6 +645,12 @@ def build_context(
     show_spec_column: bool = True,
     generated_at: datetime | None = None,
     settings: dict | None = None,
+    # 已渲染好的子系统汇总行 ✓（2026-10-09 P2 ✓）。
+    # 传了就**原样使用** ✓；不传则由 `subsystems` 按**项目级**列渲染 ✗
+    # （那是老行为：同项目有增项单/多版单时，导出件的"子系统汇总"会把别的单算进来 ✗）。
+    # 导出路由必须传 `build_quote_subsystem_rows(...)` ✓ 保证同一份文件里
+    # "报价汇总 / 报价明细 / 子系统汇总"三张表都是**同一张报价单**的数字 ✓。
+    subsystem_rows: Sequence[ExportSubsystemRow] | None = None,
 ) -> ExportContext:
     """把 ORM 对象摊平成渲染器能直接吃的 `ExportContext`。
 
@@ -598,7 +673,12 @@ def build_context(
         )
         for s in ordered
     }
-    subs = build_subsystem_rows(ordered)
+    # 子系统汇总：默认仍是"项目级列"（老调用点 ✓）；导出路由传 per-quote 行 ✓
+    subs = (
+        list(subsystem_rows)
+        if subsystem_rows is not None
+        else build_subsystem_rows(ordered)
+    )
     # 单据级覆盖（每张单可自定义条款/有效期）→ 全局设置 → 常量
     _exp = _export_settings(settings, settings_overrides=_quote_overrides(quote))
 
@@ -645,6 +725,7 @@ def build_context(
 __all__ = [
     "ExportContext", "ExportFeeRow", "ExportItemRow", "ExportMeta", "ExportSubsystemRow",
     "build_context", "build_fee_rows", "build_item_rows", "build_subsystem_rows",
+    "build_quote_subsystem_rows",
     "money", "qty_text", "rate_pct_text",
 ]
 

@@ -41,7 +41,11 @@ from app.models.quote_item import QuoteItem
 from app.models.subsystem import Subsystem
 from app.models.user import User
 from app.services.audit import quote_audit
-from app.services.export_data import ExportContext, build_context
+from app.services.export_data import (
+    ExportContext,
+    build_context,
+    build_quote_subsystem_rows,
+)
 from app.services.revisions import attach_revision_stats
 from app.services.settings import load_export_settings
 
@@ -215,6 +219,11 @@ async def export_quote_xlsx(
         include_profit=include_cost and _resolve_include_profit(user),
         # 客户版不出「设备参数」列 ✓（与 PDF 对齐 ✓；原来漏了 ✓ 表格被它撑宽 ✓）
         show_spec_column=include_cost,
+        # 子系统汇总取**本单**（2026-10-09 修 P2）✓：不传就会用项目级列 ✗ →
+        # 增项单导出时把源单的金额一起算进来 ✗，与同页「报价明细」自相矛盾 ✗。
+        subsystem_rows=build_quote_subsystem_rows(
+            items, subsystems, auxiliary_total=quote.auxiliary_total
+        ),
         settings=await load_export_settings(db),
     )
     # 渲染是几百毫秒的 CPU 独占，放线程池里跑，别卡住事件循环
@@ -260,6 +269,10 @@ async def export_quote_pdf(
         include_cost=include_cost,
         # 客户版 PDF 不出参数列 ✓（内部版 True 时出 ✓）——2026-10-05 用户要求 C
         show_spec_column=include_cost,
+        # 子系统汇总取**本单**（2026-10-09 修 P2）✓ —— 与 Excel 同一口径 ✓
+        subsystem_rows=build_quote_subsystem_rows(
+            items, subsystems, auxiliary_total=quote.auxiliary_total
+        ),
         settings=await load_export_settings(db),
     )
     from starlette.concurrency import run_in_threadpool as _rt
