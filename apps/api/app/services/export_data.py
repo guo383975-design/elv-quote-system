@@ -565,8 +565,9 @@ def _valid_until(quote: Any, valid_days: int = QUOTE_VALID_DAYS) -> str:
         return ""
 
 
-def _default_company_name() -> str:
-    """公司名称的**最终兜底** —— 与「系统设置」的 DEFAULT 是**同一个字面量** ✓。
+def _default_company() -> dict:
+    """公司抬头四项（name / address / phone / email）的**最终兜底** —— 与「系统设置」的
+    DEFAULT 是**同一份字面量** ✓。
 
     ⚠ 刻意**不**在这里另抄一份「XX科技有限公司」✗：抄一份就等于给
     "改默认公司名"留下第二个必须同步的地方 ✓（services/settings.py 开头就记着
@@ -574,7 +575,7 @@ def _default_company_name() -> str:
     """
     from app.services.settings import DEFAULTS, K_COMPANY
 
-    return _s((DEFAULTS.get(K_COMPANY) or {}).get("name"))
+    return dict(DEFAULTS.get(K_COMPANY) or {})
 
 
 def _export_settings(
@@ -610,23 +611,30 @@ def _export_settings(
     variables = build_variables(
         quote, valid_days=valid_days, overrides=overrides.get("terms_override")
     )
-    # 公司抬头（2026-10-09）—— **全系统唯一的取值口径** ✓：
-    #   本单选的名字 → 系统设置 company.name（= XX科技）→ 默认常量 ✓
+    # 公司抬头四项（2026-10-09）—— **全系统唯一的取值口径** ✓：
+    #   本单存的这一项 → 系统设置 → DEFAULTS 常量 ✓
     # ⚠ 这是本功能的命门：客户版 PDF / 内部版 PDF / Excel / 客户预览页 /
     #   `export-clauses` 接口**必须都**从这里取 ✓。少一处就是"预览写着 A 公司、
     #   导出件印着 B 公司"✗ —— 我们刚在「毛利泄露」上吃过"以为走了其实没走"的亏 ✗。
-    # ⚠ 绝不要拿 quotes.company_name **去查抬头库**再渲染 ✗：那样"改抬头库"
-    #   会追溯改写历史单据 ✗（用户硬约束 ✓）。存的就是名字本身，直接用 ✓。
-    company_name = (
-        _s(overrides.get("company_name"))
-        or _s(company.get("name"))
-        or _default_company_name()
-    )
+    # ⚠ 绝不要拿 quotes.company_* **去查抬头库**再渲染 ✗：那样"改抬头库"
+    #   会追溯改写历史单据 ✓（用户硬约束 ✗）。存的就是值本身，直接用 ✓。
+    # ⚠ **逐字段各自判断** ✓（不是"本单有任意一项就整组用本单"✗）：
+    #   只给抬头填了名称时，地址/电话/邮箱必须**各自**回落到「系统设置」那套 ✓
+    #   —— 否则它们会变成空白，客户版报价单上的联系方式就整块丢了 ✗。
+    _defaults = _default_company()
+
+    def _company_field(field: str) -> str:
+        return (
+            _s(overrides.get(f"company_{field}"))
+            or _s(company.get(field))
+            or _s(_defaults.get(field))
+        )
+
     return {
-        "company_name": company_name,
-        "company_address": company.get("address") or "",
-        "company_phone": company.get("phone") or "",
-        "company_email": company.get("email") or "",
+        "company_name": _company_field("name"),
+        "company_address": _company_field("address"),
+        "company_phone": _company_field("phone"),
+        "company_email": _company_field("email"),
         "valid_days": valid_days,
         # 渲染后的条款（给 PDF/预览直接用）
         "clauses": render_clauses(template, variables),
@@ -652,12 +660,19 @@ def _quote_overrides(quote: Any) -> dict:
     ⚠ 存的就是**公司名字符串本身** ✓（不是抬头库的下标 / id ✓）——
     这是**天然快照**：改 / 删抬头库**不会**追溯改写已开出的报价单 ✓。
     为 NULL = 回落「系统设置 → 公司名称」✓（老单行为完全不变 ✓）。
+
+    `company_address` / `company_phone` / `company_email`（2026-10-09 用户补充 ✓）：
+    抬头的另外三项 ✓ 同一套快照语义 ✓，且**逐字段**独立回落 ✓
+    （只填了名称的抬头，其余三项用系统设置那套 ✓ 不是整组绑定 ✗）。
     """
     return {
         "terms_override": getattr(quote, "terms_override", None),
         "clauses": getattr(quote, "clauses_override", None),
         "valid_days": getattr(quote, "valid_days_override", None),
         "company_name": getattr(quote, "company_name", None),
+        "company_address": getattr(quote, "company_address", None),
+        "company_phone": getattr(quote, "company_phone", None),
+        "company_email": getattr(quote, "company_email", None),
     }
 
 

@@ -51,6 +51,37 @@ DEFAULT_SUBSYSTEMS: list[str] = [
 MAX_LETTERHEADS = 20
 MAX_LETTERHEAD_LEN = 255
 
+# 抬头每一条的四个字段与各自长度上限（2026-10-09 扩展 ✓）：
+#   `name` 必填 ✓（它就是"这张单用哪家抬头"的本体 ✓）；其余三项可空 ✓。
+#   上限与 `models/quote.py` 的列宽、与设置页输入框的 maxlength 保持一致 ✓。
+LETTERHEAD_FIELDS: tuple[str, ...] = ("name", "address", "phone", "email")
+LETTERHEAD_MAXLEN: dict[str, int] = {
+    "name": 255, "address": 255, "phone": 64, "email": 255,
+}
+
+
+def normalize_letterhead(entry: Any) -> dict[str, str] | None:
+    """把一条抬头归一成 `{name, address, phone, email}`（四项都是**字符串**）。
+
+    ⚠ **兼容旧格式** ✓：`"甲公司"` 视同 `{"name": "甲公司"}` ——
+    上一版这里是**字符串数组**，读到旧格式**不能崩** ✗。
+    非 dict / 非 str 的垃圾项、以及 `name` 为空的项 → 返回 None（调用方丢弃 ✓）。
+    """
+    if isinstance(entry, str):
+        entry = {"name": entry}
+    if not isinstance(entry, dict):
+        return None
+    out = {f: (entry.get(f).strip() if isinstance(entry.get(f), str) else "")
+           for f in LETTERHEAD_FIELDS}
+    return out if out["name"] else None
+
+
+def normalize_letterheads(raw: Any) -> list[dict[str, str]]:
+    """整个抬头库归一（丢垃圾项、保留顺序）✓。不是数组 → 视为空库 ✓（不崩 ✗）。"""
+    if not isinstance(raw, list):
+        return []
+    return [n for n in (normalize_letterhead(x) for x in raw) if n is not None]
+
 DEFAULTS: dict[str, Any] = {
     # 自定义角色（2026-10-05）：内置角色不在这里，见 core/roles.py
     K_ROLES: {"custom": []},
@@ -64,8 +95,15 @@ DEFAULTS: dict[str, Any] = {
         "email": "sales@xxzn.com",
         # 公司抬头库（2026-10-09）：有时要用**别家公司抬头**去报价。
         # ⚠ 这里是**候选名单**，不是"当前生效的抬头"。单据上存的是当时选定的
-        #   那个公司名**字符串本身**（天然快照）—— 所以改/删这份名单
+        #   **值本身**（天然快照）—— 所以改/删这份名单
         #   **不会**追溯改写已开出的报价单 ✓（历史单据绝不跟着变）。
+        # 结构（2026-10-09 扩展 ✓）：`[{name, address, phone, email}, …]` ✓
+        #   —— 用户补充「地址和联系电话和邮箱还是要修改一下的」✓。
+        #   `name` 必填；其余三项可空 ✓，空的那些在导出时**逐字段**回落到
+        #   上面的 `name/address/phone/email`（系统设置那套）✓。
+        # ⚠ **兼容旧格式** ✓：以前这里是**字符串数组** `["甲公司", …]` ✓
+        #   （生产此刻就是空数组、从未落库 ✓，但导出的配置档里可能是旧格式 ✓）。
+        #   读到字符串按 `{name: 字符串}` 处理 ✓ —— 见 normalize_letterhead ✓。
         # 空 = 只有系统设置里的 `name`（= XX科技），行为与加这个功能之前完全一致。
         "letterheads": [],
     },
@@ -152,6 +190,16 @@ async def load_settings(db: AsyncSession) -> dict[str, Any]:
             out[row.key] = _merge(out[row.key], row.value)
         else:
             out[row.key] = row.value
+    # 抬头库归一（2026-10-09 扩展 ✓）：**只在这一个读取出口**做 ✓ ——
+    #   于是设置页 / 导出的配置档 / `export-clauses`（前端预览页）拿到的
+    #   永远是 `[{name,address,phone,email}]` 新格式 ✓，不必各自兼容旧格式 ✗
+    #   （各写一份兼容迟早漂移 ✗）。读到旧字符串数组也不会崩 ✓。
+    company = out.get(K_COMPANY)
+    if isinstance(company, dict):
+        out[K_COMPANY] = {
+            **company,
+            "letterheads": normalize_letterheads(company.get("letterheads")),
+        }
     return out
 
 

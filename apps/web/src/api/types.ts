@@ -501,6 +501,17 @@ export interface Quote {
    * `null` / 空 = 用「系统设置 → 公司名称」（当前是「XX科技有限公司」）。
    */
   company_name?: string | null
+  /**
+   * 抬头的另外三项（2026-10-09 用户补充：原话「地址和联系电话和邮箱还是要修改一下的」）。
+   *
+   * ⚠ 与 `company_name` **同一套快照语义**：存的是当时的**值本身**，
+   * 所以改/删抬头库**不会**追溯改写已开出的报价单 ✓。
+   * ⚠ 取值**逐字段**独立回落：本单这一项为空 → 用「系统设置」的那一项 ✓
+   * （不是整组绑定 ✗）。只给抬头填了名称时，这三项仍显示系统设置那套 ✓。
+   */
+  company_address?: string | null
+  company_phone?: string | null
+  company_email?: string | null
   /** 安装单价方式：manual=手填（缺省）/ quota=套定额 */
   install_mode?: string
   customer_name: string | null

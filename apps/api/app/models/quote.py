@@ -126,10 +126,18 @@ class Quote(UUIDPKMixin, TimestampMixin, Base):
     #     **不会**追溯改写这张单 ✓（用户硬约束：「历史单据绝不能跟着变」✓）。
     #   NULL / 空 = 用「系统设置 → 公司名称」（当前「XX科技有限公司」）✓
     #     —— 老单一个字段没动，导出行为与加这个功能之前**完全一致** ✓。
-    #   只存公司**名称** ✓：地址 / 电话 / 邮箱 / 税号 / Logo / 盖章位一律不进这一列 ✓。
+    #   只存公司抬头**本身的信息** ✓：税号 / Logo / 盖章位一律不做 ✓。
     #   取值的**唯一收口**在 services/export_data.py 的 `_export_settings()` ✓
     #   （客户版 PDF / 内部版 PDF / Excel / 客户预览页 / export-clauses 全走它 ✓）。
     company_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # 抬头的另外三项（2026-10-09 用户补充 ✓）：原话「地址和联系电话和邮箱还是要修改一下的」✓。
+    #   与 company_name **同一套快照语义** ✓：存的是当时的**值本身** ✓（不是指向抬头库的 id ✓）。
+    #   ⚠ 取值**逐字段**回落 ✓（本单这个字段空 → 用系统设置的那个字段 ✓）：
+    #     只给抬头填了名称 → 地址/电话/邮箱自动用「系统设置」那套 ✓，
+    #     而**不是**整组绑定 / 整组丢弃 ✗（见 export_data._export_settings ✓）。
+    company_address: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    company_phone: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    company_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     # 批准时间（2026-10-04）：看板按它取"最新一版"与月度趋势。
     # 应用层写 datetime.now(UTC)（微秒精度）；靠 created_at 推断在秒级库里分不出先后。

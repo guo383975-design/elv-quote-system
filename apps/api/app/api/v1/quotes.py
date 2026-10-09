@@ -436,7 +436,12 @@ async def create_quote(
             #   否则「主单用浙江某某公司报价、增项单却印XX科技」✗ —— 同一客户
             #   收到的两份文件抬头不一致 ✓（静默发错 ✗，正是本功能要防的事 ✓）。
             #   调用方显式传了 company_name 就以调用方为准 ✓（下面 `is None` 判断 ✓）。
+            # 四项一起沿用 ✓（2026-10-09 用户补充 ✓）：只拷名称会导致增项单的
+            #   地址/电话/邮箱又变回系统设置那套 ✗（同一抬头却印出两套联系方式 ✗）。
             "company_name",
+            "company_address",
+            "company_phone",
+            "company_email",
         ):
             if data.get(_f) is None and getattr(_src, _f, None) is not None:
                 data[_f] = getattr(_src, _f)
@@ -1773,7 +1778,13 @@ async def quote_export_clauses(
             #   ⚠ 原来这里只传了条款三项 ✗，而下面直接返回 `s["company"]`
             #   （= 只有系统设置 ✓）✗ ⇒ 本单选了别家抬头，**预览页仍显示XX科技** ✗
             #   —— 典型的"以为走了收口、其实没走"✗（客户预览与导出件口径分叉 ✗）。
+            # 四项都要传 ✓（2026-10-09 用户补充「地址和联系电话和邮箱」✓）：
+            #   少传一项 → 预览页的联系行就还是系统设置那套 ✗（与 PDF 不一致 ✗）。
+            #   逐字段回落由 `_export_settings` 负责 ✓（本单空的那项自动用系统设置 ✓）。
             "company_name": getattr(quote, "company_name", None),
+            "company_address": getattr(quote, "company_address", None),
+            "company_phone": getattr(quote, "company_phone", None),
+            "company_email": getattr(quote, "company_email", None),
         },
     )
     return {
@@ -1787,11 +1798,17 @@ async def quote_export_clauses(
         # 供前端把"本单数字"填进输入框 ✓（未覆盖就是系统设置里的生效值 ✓）
         "terms_override": getattr(quote, "terms_override", None),
         "terms_overridden": exp["terms_overridden"],
-        # 公司抬头（2026-10-09）✓：把 **exp 里算好的名称** 盖回 company.name ✓。
-        #   前端预览页读的就是 `company.name` ✓（QuotePreviewView 的封面/页眉 ✓）。
+        # 公司抬头（2026-10-09）✓：把 **exp 里算好的四项** 盖回 company ✓。
+        #   前端预览页读的就是 `company.name` 与 `companyLine`（地址/电话/邮箱）✓。
         #   ⚠ 不要返回 `s["company"]` 原样 ✗ —— 那是"只有系统设置"，
-        #   本单选了别家抬头时预览就会印成XX科技 ✗。
-        "company": {**s["company"], "name": exp["company_name"]},
+        #   本单选了别家抬头时预览就会印成XX科技那套 ✗。
+        "company": {
+            **s["company"],
+            "name": exp["company_name"],
+            "address": exp["company_address"],
+            "phone": exp["company_phone"],
+            "email": exp["company_email"],
+        },
     }
 
 

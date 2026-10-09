@@ -25,6 +25,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
 from app.services.export_data import ExportContext
+from app.services.xlsx_safe import harden
 
 # ---------------------------------------------------------------------------
 # 样式
@@ -89,6 +90,8 @@ def _put(ws: Worksheet, row: int, col: int, *, text: str, fmt: str, align: Align
         c.value = val
         if isinstance(val, (int, float)):
             c.number_format = fmt
+    # 解析不成数字 → 原样落成文本，但**不能落成公式**（见 xlsx_safe 模块头）
+    harden(c)
     c.alignment = align
     if font:
         c.font = font
@@ -102,6 +105,7 @@ def _put_text(ws: Worksheet, row: int, col: int, text: str, *,
               font: Font | None = None, align: Alignment | None = None,
               fill: PatternFill | None = None, border: bool = True) -> None:
     c = ws.cell(row=row, column=col, value=text if text != "" else None)
+    harden(c)
     c.alignment = align or _LEFT
     if font:
         c.font = font
@@ -150,11 +154,27 @@ def _sheet_summary(wb: Workbook, ctx: ExportContext) -> None:
     m = ctx.meta
 
     ws.cell(row=1, column=1, value=m.title or "工程报价单").font = _TITLE_FONT
+    harden(ws.cell(row=1, column=1))
     ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=3)
     ws.cell(row=1, column=1).alignment = _LEFT
     ws.cell(row=2, column=1, value=ctx.meta.company_name or "").font = Font(size=10)
+    harden(ws.cell(row=2, column=1))
     ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=3)
     ws.cell(row=2, column=1).alignment = _LEFT
+    # 抬头的联系方式（2026-10-09 用户补充 ✓）：原话「地址和联系电话和邮箱还是要修改一下的」✓。
+    #   ⚠ 三项与公司名**同一套口径** ✓：值来自 build_context 的 meta ✓，
+    #     在那里已经**逐字段**算好「本单 → 系统设置 → DEFAULTS」✓（不在这里重新判断 ✗）。
+    #   分隔符与 `export_pdf._title_flowables` 的公司联系行**保持一致**（全角空格 ✓），
+    #   这样 Excel 与客户版 PDF 抬头看起来是同一个东西 ✓。
+    #   ⚠ 放在**本来空着的第 3 行** ✓ —— 下面 info 表仍从第 4 行开始 ✓ 整张表不挪位 ✓。
+    contact = "　".join(
+        x for x in (ctx.meta.company_address, ctx.meta.company_phone, ctx.meta.company_email) if x
+    )
+    if contact:
+        ws.cell(row=3, column=1, value=contact).font = Font(size=9)
+        harden(ws.cell(row=3, column=1))
+        ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=3)
+        ws.cell(row=3, column=1).alignment = _LEFT
 
     info: list[tuple[str, str]] = [
         ("报价单号", m.quote_code),

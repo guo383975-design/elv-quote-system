@@ -250,14 +250,24 @@ async def test_unknown_or_empty_letterhead_does_not_crash(
 async def test_letterheads_library_is_sanitised(
     client: AsyncClient, db: AsyncSession, admin_headers
 ) -> None:
-    # 去空 + 去重（保留首次出现的顺序）✓
+    """净化规则 + 「只传 name 时不许抹掉抬头库」✓。
+
+    ⚠ 结构在第二批（2026-10-09 用户补充「地址和联系电话和邮箱」）扩成了
+      `[{name, address, phone, email}]` ✓ —— 旧格式（字符串数组）仍兼容 ✓，
+      详见 `test_quote_letterhead_fields.py::test_letterheads_store_four_fields_and_normalise_legacy_strings` ✓。
+      这里保留的是**净化/校验/不误抹**这几条 ✓。
+    """
+    # 去空 + 去重（保留首次出现的顺序）✓ —— 归一成四字段对象 ✓
     r = await client.patch(
         "/api/v1/settings",
         headers=admin_headers,
         json={"company": {"letterheads": [" 甲公司 ", "", "乙公司", "甲公司", "   "]}},
     )
     assert r.status_code == 200, r.text
-    assert r.json()["company"]["letterheads"] == ["甲公司", "乙公司"], r.json()
+    assert r.json()["company"]["letterheads"] == [
+        {"name": "甲公司", "address": "", "phone": "", "email": ""},
+        {"name": "乙公司", "address": "", "phone": "", "email": ""},
+    ], r.json()
 
     # 不是数组 → 422
     r = await client.patch(
@@ -265,7 +275,7 @@ async def test_letterheads_library_is_sanitised(
     )
     assert r.status_code == 422, r.text
 
-    # 数组里混进非字符串 → 422
+    # 数组里混进数字 → 422（既不是字符串也不是对象 = 接口误用）
     r = await client.patch(
         "/api/v1/settings",
         headers=admin_headers,
@@ -273,7 +283,7 @@ async def test_letterheads_library_is_sanitised(
     )
     assert r.status_code == 422, r.text
 
-    # 单条超长 → 422
+    # 单条（名称）超长 → 422
     r = await client.patch(
         "/api/v1/settings",
         headers=admin_headers,
@@ -294,4 +304,7 @@ async def test_letterheads_library_is_sanitised(
         "/api/v1/settings", headers=admin_headers, json={"company": {"name": "新总公司"}}
     )
     assert r.status_code == 200, r.text
-    assert r.json()["company"]["letterheads"] == ["甲公司", "乙公司"], r.json()
+    assert r.json()["company"]["letterheads"] == [
+        {"name": "甲公司", "address": "", "phone": "", "email": ""},
+        {"name": "乙公司", "address": "", "phone": "", "email": ""},
+    ], r.json()

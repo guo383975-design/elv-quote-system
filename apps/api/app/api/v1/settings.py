@@ -18,9 +18,10 @@ from app.core.logging import get_logger
 from app.db.session import get_db
 from app.models.user import User
 from app.services.settings import (
-    MAX_LETTERHEAD_LEN,
+    LETTERHEAD_MAXLEN,
     MAX_LETTERHEADS,
     load_settings,
+    normalize_letterhead,
     redact_settings,
     save_settings,
     strip_ai_secrets,
@@ -172,12 +173,17 @@ async def _validate_settings_patch(db: AsyncSession, body: dict) -> None:
                 )
         body["roles"] = {**roles_patch, "custom": cleaned}
 
-    # 公司抬头库（2026-10-09）：报价单可选用哪家公司的名字报价。
-    # 这里只维护**候选名单**。单据上存的是当时选定的那个公司名**字符串本身**
+    # 公司抬头库（2026-10-09）：报价单可选用哪家公司抬头报价。
+    # 这里只维护**候选名单**。单据上存的是当时选定那一项的**值本身**
     # （天然快照），所以改/删这份名单**不会**追溯改写已开出的报价单 ——
     # 这正是"历史单据绝不跟着变"的实现方式 ✓。
-    # 净化动作：去空、去重、限长、限量；空串直接丢掉（前端多留一行空输入框
-    # 不该报错），但**类型错**要拦（数组里混进数字/对象是接口误用）。
+    # 结构（2026-10-09 扩展 ✓，用户补充「地址和联系电话和邮箱」）：
+    #   `[{name, address, phone, email}, …]`，`name` 必填、其余三项可空 ✓。
+    # 净化动作：按字段去空白、**按名称去重**、限长（每字段各自上限）、限量；
+    #   `name` 为空的那条直接丢掉（前端多留一行空输入框不该报错 ✓）；
+    #   但**类型错**要拦（数组里混进数字、或一项不是字符串/对象 = 接口误用 ✗）。
+    # ⚠ **兼容旧格式** ✓：以前是字符串数组 `["甲公司"]` —— 归一成
+    #   `{"name": "甲公司"}` ✓（normalize_letterhead ✓），读到旧格式不能崩 ✗。
     company_patch = body.get("company")
     if isinstance(company_patch, dict) and "letterheads" in company_patch:
         raw = company_patch.get("letterheads")
@@ -185,22 +191,33 @@ async def _validate_settings_patch(db: AsyncSession, body: dict) -> None:
             raw = []
         if not isinstance(raw, list):
             raise HTTPException(status_code=422, detail="company.letterheads 必须是数组")
-        cleaned_letterheads: list[str] = []
+        cleaned_letterheads: list[dict[str, str]] = []
+        seen_names: set[str] = set()
         for item in raw:
-            if not isinstance(item, str):
-                raise HTTPException(
-                    status_code=422, detail="company.letterheads 里每一项都必须是字符串"
-                )
-            name = item.strip()
-            if not name:
-                continue
-            if len(name) > MAX_LETTERHEAD_LEN:
+            if not isinstance(item, (str, dict)):
                 raise HTTPException(
                     status_code=422,
-                    detail=f"公司抬头过长（最多 {MAX_LETTERHEAD_LEN} 字）：{name[:20]}…",
+                    detail="company.letterheads 里每一项必须是公司名，或含 name 的对象",
                 )
-            if name not in cleaned_letterheads:
-                cleaned_letterheads.append(name)
+            if isinstance(item, str) and not item.strip():
+                continue  # 旧格式的空串：丢掉（前端多留一行空输入框不该报错 ✓）
+            entry = normalize_letterhead(item)
+            if entry is None:
+                # 对象但 name 为空 → 当作"还没填完的一行"丢掉 ✓（不报错 ✓）
+                continue
+            for field, limit in LETTERHEAD_MAXLEN.items():
+                if len(entry[field]) > limit:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            f"公司抬头的「{field}」过长（最多 {limit} 字）："
+                            f"{entry[field][:20]}…"
+                        ),
+                    )
+            if entry["name"] in seen_names:
+                continue  # 同名去重（保留首次出现的顺序 ✓）
+            seen_names.add(entry["name"])
+            cleaned_letterheads.append(entry)
         if len(cleaned_letterheads) > MAX_LETTERHEADS:
             raise HTTPException(
                 status_code=422,

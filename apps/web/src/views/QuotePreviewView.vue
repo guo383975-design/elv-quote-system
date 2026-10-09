@@ -713,7 +713,7 @@ function back(): void {
         <!-- 抬头 -->
         <div class="doc-head">
           <div class="doc-company">
-            <div class="doc-brand">XX科技</div>
+            <div class="doc-brand">智能化弱电</div>
             <div>
               <div class="doc-company-name">{{ company.name }}</div>
               <div class="doc-company-meta">{{ companyLine }}</div>
@@ -865,7 +865,7 @@ function back(): void {
         <template v-if="pg.head">
           <div class="doc-head">
             <div class="doc-company">
-              <div class="doc-brand">XX科技</div>
+              <div class="doc-brand">智能化弱电</div>
               <div>
                 <div class="doc-company-name">{{ company.name }}</div>
                 <div class="doc-company-meta">{{ companyLine }}</div>
@@ -1141,16 +1141,21 @@ function back(): void {
 }
 
 .doc-brand {
-  /* 2026-10-05 用户要求：品牌字由「弱」改为「XX科技」✓ → 方框改成能容两个字的圆角块 ✓ */
+  /* 2026-10-05 用户要求：品牌字由「弱」改为「XX科技」✓ → 方框改成能容两个字的圆角块 ✓
+     2026-10-09 用户要求：抬头换公司名后这个徽标**不该还写着XX科技** ✗ →
+     改成**中性品牌字「智能化弱电」** ✓（5 个字 ✓，是产品/系统品牌 ✓ 不随抬头变 ✓）。
+     ⇒ 字号 13→**12px**、字距 1→0.5px ✓：5 字盒宽 ≈70px（原 2 字受 min-width 约束 = 42px），
+       高度仍 26px ✓，尽量少挤占旁边的公司名 ✓（页头是 flex，公司名会右移约 28px ✓）。 */
   min-width: 42px;
   height: 26px;
-  padding: 0 7px;
+  padding: 0 6px;
   border-radius: 6px;
   background: #14243d;
   color: #fff;
-  font-size: 13px;
-  letter-spacing: 1px;
+  font-size: 12px;
+  letter-spacing: 0.5px;
   font-weight: 700;
+  white-space: nowrap;
   display: flex;
   align-items: center;
   justify-content: center;

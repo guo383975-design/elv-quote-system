@@ -14,7 +14,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 
 import { authApi, settingApi , aiApi , factoryResetApi , permissionApi } from '@/api'
-import type { PermissionMatrix, SettingsDocument } from '@/api'
+import type { Letterhead, PermissionMatrix, SettingsDocument } from '@/api'
 import type { AiConfig, AiUsage } from '@/api/types'
 import type { LoginLogEntry } from '@/api/types'
 import { dateTime } from '@/utils/format'
@@ -299,10 +299,11 @@ const company = reactive({
   address: '',
   phone: '',
   email: '',
-  /** 公司抬头库（2026-10-09）：报价单可选用的**其它公司名称**（建议 3~5 个）。
-   *  这是**候选名单**，不是"当前生效的抬头" —— 单据上存的是当时选定的名字本身，
-   *  所以在这里改/删**不会**追溯改写已开出的报价单 ✓。 */
-  letterheads: [] as string[],
+  /** 公司抬头库（2026-10-09）：报价单可选用的**其它公司抬头**（名称 + 地址/电话/邮箱，建议 3~5 个）。
+   *  这是**候选名单**，不是"当前生效的抬头" —— 单据上存的是当时选定那一项的**值本身**，
+   *  所以在这里改/删**不会**追溯改写已开出的报价单 ✓。
+   *  ⚠ `name` 必填；其余三项可空 ✓（空的那些在导出/预览时**逐字段**回落上面那套 ✓）。 */
+  letterheads: [] as Letterhead[],
 })
 const quote = reactive({
   valid_days: 30,
@@ -600,7 +601,18 @@ async function load(): Promise<void> {
       address: s.company.address ?? '',
       phone: s.company.phone ?? '',
       email: s.company.email ?? '',
-      letterheads: [...(s.company.letterheads ?? [])],
+      // 抬头库：后端已在**唯一读取出口**归一成 `{name,address,phone,email}` ✓；
+      // 这里再兜一层旧格式（字符串数组 ✓，例如导入的旧配置档 ✓），保证界面不崩 ✗。
+      letterheads: ((s.company.letterheads ?? []) as Array<Letterhead | string>).map((lh) =>
+        typeof lh === 'string'
+          ? { name: lh, address: '', phone: '', email: '' }
+          : {
+              name: lh?.name ?? '',
+              address: lh?.address ?? '',
+              phone: lh?.phone ?? '',
+              email: lh?.email ?? '',
+            },
+      ),
     })
     quote.valid_days = s.quote.valid_days ?? 30
   quote.prepay_ratio = s.quote.prepay_ratio ?? 30
@@ -636,16 +648,37 @@ function moveClause(idx: number, delta: number): void {
   quote.clauses.splice(target, 0, row)
 }
 
-/** 公司抬头库（2026-10-09）：去空、去重（与后端同一套规则 ✓）——
- *  前端先拦住是为了给个**当场看得懂**的提示 ✓，而不是保存后吃 422 ✓。 */
-const cleanedLetterheads = computed(() => {
-  const out: string[] = []
-  for (const raw of company.letterheads) {
-    const n = String(raw ?? '').trim()
-    if (!n || out.includes(n)) continue
-    out.push(n)
+/** 公司抬头库（2026-10-09）：逐字段去空白、按名称去重（与后端同一套规则 ✓）——
+ *  前端先拦住是为了给个**当场看得懂**的提示 ✓，而不是保存后吃 422 ✓。
+ *  `name` 为空的条目在这里被丢掉 ✓（保存前另有专门提示，见 save()）。 */
+const cleanedLetterheads = computed<Letterhead[]>(() => {
+  const out: Letterhead[] = []
+  const seen = new Set<string>()
+  for (const lh of company.letterheads) {
+    const name = String(lh?.name ?? '').trim()
+    if (!name || seen.has(name)) continue
+    seen.add(name)
+    out.push({
+      name,
+      address: String(lh?.address ?? '').trim(),
+      phone: String(lh?.phone ?? '').trim(),
+      email: String(lh?.email ?? '').trim(),
+    })
   }
   return out
+})
+
+/** 那一行填了内容却**没填公司名称** ✗（后端会当"没填完的一行"丢掉，
+ *  但那样用户会以为存上了 ✓ → 这里明确拦住并说清是哪一行 ✓）。 */
+const letterheadMissingName = computed(() => {
+  const i = company.letterheads.findIndex(
+    (lh) =>
+      !String(lh?.name ?? '').trim() &&
+      !!(String(lh?.address ?? '').trim() ||
+        String(lh?.phone ?? '').trim() ||
+        String(lh?.email ?? '').trim()),
+  )
+  return i < 0 ? null : i + 1
 })
 
 async function save(): Promise<void> {
@@ -654,16 +687,34 @@ async function save(): Promise<void> {
     return
   }
   // 抬头库（2026-10-09）：上限与后端 services/settings.py 的 MAX_LETTERHEADS /
-  // MAX_LETTERHEAD_LEN 保持一致（后端仍会再校验一次 ✓，前端这层只是提示更友好 ✓）。
+  // LETTERHEAD_MAXLEN 保持一致（后端仍会再校验一次 ✓，前端这层只是提示更友好 ✓）。
+  const missing = letterheadMissingName.value
+  if (missing !== null) {
+    ElMessage.warning(`抬头库第 ${missing} 行填了地址/电话/邮箱，但「公司名称」是必填的`)
+    return
+  }
   const heads = cleanedLetterheads.value
   if (heads.length > 20) {
     ElMessage.warning('公司抬头最多 20 个')
     return
   }
-  const tooLong = heads.find((n) => n.length > 255)
-  if (tooLong) {
-    ElMessage.warning(`公司抬头过长（最多 255 字）：${tooLong.slice(0, 20)}…`)
-    return
+  for (const h of heads) {
+    if (h.name.length > 255) {
+      ElMessage.warning(`抬头名称过长（最多 255 字）：${h.name.slice(0, 20)}…`)
+      return
+    }
+    if ((h.address ?? '').length > 255) {
+      ElMessage.warning(`抬头「${h.name}」的地址过长（最多 255 字）`)
+      return
+    }
+    if ((h.phone ?? '').length > 64) {
+      ElMessage.warning(`抬头「${h.name}」的电话过长（最多 64 字）`)
+      return
+    }
+    if ((h.email ?? '').length > 255) {
+      ElMessage.warning(`抬头「${h.name}」的邮箱过长（最多 255 字）`)
+      return
+    }
   }
   if (!quote.valid_days || quote.valid_days < 1) {
     ElMessage.warning('报价有效期要大于 0 天')
@@ -763,35 +814,64 @@ function reset(): void {
         </el-row>
 
         <!-- 公司抬头库（2026-10-09）：有时要用**别家公司抬头**去报价 ✓。
-             只存**公司名称** ✓ —— 地址/电话/邮箱/税号/Logo/盖章位一律不进这里 ✓。
+             一开始只存公司名称；用户随即补充「地址和联系电话和邮箱还是要修改一下的」
+             ⇒ 每条现在存**名称 + 地址 + 电话 + 邮箱**（名称必填、其余可空 ✓）。
+             税号 / Logo / 盖章位仍然不做 ✓。
              这里是"候选名单"：改/删它**不会**追溯改写已开出的报价单 ✓。 -->
         <el-form-item label="公司抬头库">
           <div style="width: 100%">
             <div
               v-for="(_n, i) in company.letterheads"
               :key="i"
-              style="display: flex; gap: 8px; align-items: center; margin-bottom: 6px"
+              style="display: flex; flex-direction: column; gap: 4px;
+                     margin-bottom: 10px; padding-bottom: 8px;
+                     border-bottom: 1px dashed var(--el-border-color-lighter)"
             >
-              <el-input
-                v-model="company.letterheads[i]"
-                maxlength="255"
-                placeholder="例如：浙江某某科技有限公司"
-                style="max-width: 420px"
-              />
-              <el-button link type="danger" @click="company.letterheads.splice(i, 1)">删</el-button>
+              <div style="display: flex; gap: 8px; align-items: center">
+                <el-input
+                  v-model="company.letterheads[i].name"
+                  maxlength="255"
+                  placeholder="公司名称（必填），例如：浙江某某科技有限公司"
+                  style="max-width: 420px"
+                />
+                <el-button link type="danger" @click="company.letterheads.splice(i, 1)">删</el-button>
+              </div>
+              <!-- 地址 / 电话 / 邮箱（2026-10-09 用户补充 ✓）：可空 ✓ ——
+                   空的那几项在导出/预览时**逐字段**回落到上面「公司信息」那套 ✓。 -->
+              <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap">
+                <el-input
+                  v-model="company.letterheads[i].address"
+                  maxlength="255"
+                  placeholder="地址（可空 → 用上面「公司信息」的地址）"
+                  style="max-width: 300px"
+                />
+                <el-input
+                  v-model="company.letterheads[i].phone"
+                  maxlength="64"
+                  placeholder="电话（可空）"
+                  style="max-width: 180px"
+                />
+                <el-input
+                  v-model="company.letterheads[i].email"
+                  maxlength="255"
+                  placeholder="邮箱（可空）"
+                  style="max-width: 220px"
+                />
+              </div>
             </div>
             <el-button
               size="small"
               :disabled="company.letterheads.length >= 20"
-              @click="company.letterheads.push('')"
+              @click="company.letterheads.push({ name: '', address: '', phone: '', email: '' })"
             >
               + 加一个抬头
             </el-button>
             <div class="text-muted" style="margin-top: 6px; font-size: 12px">
               报价时可在「报价条款」弹窗里选用（建议 3~5 个 ✓）。
-              每张报价单记的是**当时选定的那个公司名本身** ✓ ——
-              所以在这里改 / 删名字，**已开出的报价单不会被追溯改写** ✓
-              （不选 = 用上面的「公司名称」✓）。
+              每张报价单记的是**当时选定那一项的名称/地址/电话/邮箱本身** ✓ ——
+              所以在这里改 / 删，**已开出的报价单不会被追溯改写** ✓。
+              只填名称也能用 ✓：地址/电话/邮箱会**各自**沿用上面「公司信息」那一套 ✓
+              （不选 = 整组用上面的 ✓）。
               <span v-if="company.letterheads.length">　当前 {{ company.letterheads.length }} 个</span>
             </div>
           </div>

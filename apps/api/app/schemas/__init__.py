@@ -575,6 +575,10 @@ class QuoteCreate(BaseModel):
     #   ⚠ 增项（based_on_quote_id）会自动沿用原单的抬头 ✓ —— 见
     #   api/v1/quotes.py create_quote 的「从原单复制」清单 ✓（显式传了就以调用方为准 ✓）。
     company_name: str | None = Field(None, max_length=255)
+    # 抬头的另外三项（2026-10-09 用户补充 ✓）：建单时也可直接给 ✓。
+    company_address: str | None = Field(None, max_length=255)
+    company_phone: str | None = Field(None, max_length=64)
+    company_email: str | None = Field(None, max_length=255)
     auxiliary_base: AuxiliaryBaseType = AuxiliaryBaseType.DEVICE
     auxiliary_rate: Decimal = Field(Decimal("0.06"), ge=RATE_MIN, le=RATE_MAX)
     design_rate: Decimal = Field(Decimal("0.02"), ge=RATE_MIN, le=RATE_MAX)
@@ -624,6 +628,12 @@ class QuoteUpdate(BaseModel):
     #   传 null / 不传 = 回落「系统设置 → 公司名称」✓（老单行为不变 ✓）。
     #   长度上限 255 与 models/quote.py 的列宽、与抬头库的单条上限一致 ✓。
     company_name: str | None = Field(None, max_length=255)
+    # 抬头的另外三项（2026-10-09 用户补充 ✓）：原话「地址和联系电话和邮箱还是要修改一下的」✓。
+    #   与 company_name 一样是**本单快照** ✓；各自为空就**各自**回落系统设置 ✓（不整组绑定 ✗）。
+    #   长度上限与 models/quote.py 的列宽、与抬头库的单条上限一致 ✓。
+    company_address: str | None = Field(None, max_length=255)
+    company_phone: str | None = Field(None, max_length=64)
+    company_email: str | None = Field(None, max_length=255)
     # 安装单价方式（2026-10-05 用户设计）：manual=手填；quota=套定额（基价自动填）
     install_mode: str | None = Field(None, pattern="^(manual|quota)$")
     clauses_override: list[str] | None = None
@@ -685,6 +695,11 @@ class QuoteOut(ORMBase):
     #   天然快照：改 / 删抬头库**不会**追溯改写已开出的报价单 ✓。
     #   前端「报价条款」弹窗的公司抬头下拉靠这个字段回填 ✓。
     company_name: str | None = None
+    # 抬头的另外三项（2026-10-09 用户补充 ✓）：同一套快照语义 ✓
+    #   （存值本身、各自独立回落 ✓）。前端「报价条款」弹窗选了抬头后靠这三个回填 ✓。
+    company_address: str | None = None
+    company_phone: str | None = None
+    company_email: str | None = None
     customer_name: str | None = None
     customer_contact: str | None = None
     customer_phone: str | None = None
