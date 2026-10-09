@@ -95,8 +95,10 @@ class Project(UUIDPKMixin, TimestampMixin, Base):
     )
     # 项目操作留痕（状态变更等）。不留 lazy="selectin"：留痕表会随时间变长，
     # 列表接口不该顺手把每一单的全部留痕都拉出来。
+    # 同样不带 delete 级联（2026-10-09）：删项目必须留下"谁删的"这条痕，
+    # 见 api/v1/projects.py 的 delete_project 与 models/quote.py 的同名注释。
     audit_logs: Mapped[list[ProjectAuditLog]] = relationship(  # noqa: F821
-        back_populates="project", cascade="all, delete-orphan"
+        back_populates="project", cascade="save-update, merge"
     )
 
     def __repr__(self) -> str:  # pragma: no cover

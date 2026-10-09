@@ -6,7 +6,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_permission
@@ -17,7 +17,7 @@ from app.core.workflow import (
     project_transition_error,
 )
 from app.db.session import get_db
-from app.models.audit import AuditAction, ProjectAuditLog
+from app.models.audit import AuditAction, ProjectAuditLog, QuoteAuditLog
 from app.models.project import Project, ProjectStatus, ProjectType
 from app.models.quote import Quote, QuoteStatus
 from app.models.subsystem import Subsystem
@@ -29,7 +29,7 @@ from app.schemas import (
     ProjectUpdate,
     SubsystemOut,
 )
-from app.services.audit import project_audit
+from app.services.audit import project_audit, quote_audit
 
 router = APIRouter(prefix="/projects", tags=["项目"])
 log = get_logger("api.projects")
@@ -407,11 +407,85 @@ async def delete_project(
     db: Annotated[AsyncSession, Depends(get_db)],
     user: Annotated[User, Depends(require_permission("project", "delete"))],
 ) -> None:
+    """删除项目（级联删除子系统与报价单）。
+
+    ⚠ 2026-10-09 补留痕：这个接口原来**只做 `db.delete(project)`** ——
+    ORM 级联把 subsystems / quotes / quote_items 一起删掉，**一条痕都不留**。
+    也就是说「删一个项目 = 一整套报价数据消失，且查不到是谁删的」，
+    是 2026-10-08 清库事故那类"无痕"路径里仅剩的一条。
+    现在与单张删单接口（quotes.py）同口径：
+
+      · 项目一条 DELETE 留痕（外键置空、单号留快照）；
+      · **每张被级联删掉的报价单各一条** DELETE 留痕，并标注 `via=project_delete`
+        —— 事后要分得清"有人逐张删的"和"删项目带走的"。
+
+    留痕能活下来靠两件事：外键是 `ON DELETE SET NULL`，且模型里**不带**
+    delete 级联（见 models/quote.py、models/project.py 的同名注释）。
+    """
     project = await db.get(Project, project_id)
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
+
+    quotes = list(
+        (await db.scalars(select(Quote).where(Quote.project_id == project.id))).all()
+    )
+    db.add(
+        project_audit(
+            project_id=project.id,
+            project_code=project.code,
+            user_id=user.id,
+            action=AuditAction.DELETE,
+            payload={
+                "code": project.code,
+                "name": project.name,
+                "status": str(project.status),
+                "quote_count": len(quotes),
+                "quote_codes": [q.code for q in quotes],
+            },
+        )
+    )
+    for quote in quotes:
+        db.add(
+            quote_audit(
+                quote_id=quote.id,
+                quote_code=quote.code,
+                user_id=user.id,
+                action=AuditAction.DELETE,
+                payload={
+                    "code": quote.code,
+                    "title": quote.title,
+                    "status": str(quote.status),
+                    "total_with_tax": str(quote.total_with_tax),
+                    "item_count": len(quote.items or []),
+                    # 与"逐张删单"区分开：这条痕是删项目带出来的
+                    "via": "project_delete",
+                    "project_code": project.code,
+                },
+            )
+        )
+    await db.flush()
+
+    # 显式把留痕外键置空：不依赖数据库的 ON DELETE SET NULL 实现
+    # （生产是 PG 会置空，但测试用的 SQLite 默认不启用外键，两边行为要一致）。
+    if quotes:
+        await db.execute(
+            update(QuoteAuditLog)
+            .where(QuoteAuditLog.quote_id.in_([q.id for q in quotes]))
+            .values(quote_id=None)
+            .execution_options(synchronize_session=False)
+        )
+    await db.execute(
+        update(ProjectAuditLog)
+        .where(ProjectAuditLog.project_id == project.id)
+        .values(project_id=None)
+        .execution_options(synchronize_session=False)
+    )
+
     await db.delete(project)
-    log.warning(f"删除项目 {project.code} by {user.username}")
+    log.warning(
+        f"删除项目 {project.code} by {user.username}"
+        f"（级联删除报价单 {len(quotes)} 张，已留痕）"
+    )
 
 
 @router.get(

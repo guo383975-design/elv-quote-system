@@ -161,8 +161,14 @@ class Quote(UUIDPKMixin, TimestampMixin, Base):
         #   现在固定按 sort_order → created_at → id ✓（created_at 都已写入 ✓）
         order_by="QuoteItem.sort_order, QuoteItem.created_at, QuoteItem.id",
     )
+    # 留痕**不是**报价单的"子对象"：删单必须留下历史（H-10）。
+    # 2026-10-09 修：这里原来是 `cascade="all, delete-orphan"` —— 一旦留痕
+    # 被加载进会话（lazy="selectin"，读详情就会加载），删单时 SQLAlchemy 会把
+    # 它们一起 DELETE 掉，`ON DELETE SET NULL` 那道保护根本轮不到生效。
+    # 现在不带 delete 级联：删父行时 SQLAlchemy 只会把子行的外键**置空**，
+    # 留痕活下来（与数据库的 SET NULL 语义一致）。
     audit_logs: Mapped[list[QuoteAuditLog]] = relationship(  # noqa: F821
-        back_populates="quote", cascade="all, delete-orphan", lazy="selectin"
+        back_populates="quote", cascade="save-update, merge", lazy="selectin"
     )
 
     def __repr__(self) -> str:  # pragma: no cover
