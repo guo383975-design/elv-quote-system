@@ -344,29 +344,54 @@ def build_subsystem_rows(subsystems: Iterable[Any]) -> list[ExportSubsystemRow]:
     return out
 
 
-def build_quote_subsystem_rows(
+@dataclass(frozen=True)
+class QuoteSubsystemTotal:
+    """**本单**在某子系统上的合计（原始 Decimal，未格式化）。
+
+    这是"本单口径"的**唯一实现** ✓：导出件（`build_quote_subsystem_rows` ✓）
+    与界面上的「子系统汇总（可对外）」面板（`GET /quotes/{id}/subsystems` ✓）
+    都从它派生 ✓ —— 两处只是**渲染方式**不同 ✓（导出要千分位字符串 ✓、
+    接口要 JSON 数字 ✓），求和与分摊规则只有这一份 ✓。
+    谁都不许再写第二套按 subsystem_id 求和的算法 ✗
+    （一旦分叉，界面上的数字和发给甲方的文件就会对不上 ✗）。
+    """
+
+    subsystem_id: str
+    subsystem_type: str
+    name: str
+    point_count: int
+    equipment: Decimal
+    install: Decimal
+    auxiliary: Decimal
+    amount: Decimal
+
+
+def per_quote_subsystem_totals(
     items: Iterable[Any], subsystems: Iterable[Any], auxiliary_total: Any = 0
-) -> list[ExportSubsystemRow]:
-    """**本单**的子系统小计（2026-10-09 修 P2）✓。
+) -> list[QuoteSubsystemTotal]:
+    """**本单**的子系统小计（2026-10-09 修 P2）✓ —— 唯一算法。
 
     为什么不能直接用 `subsystems[*].equipment_subtotal` ✗：
     `build_subsystem_rows` 读的 `subsystems.equipment_subtotal / install_subtotal /
     auxiliary_subtotal` 是**项目级**列 ✓（由 `quotes._rollup_subsystems` 按
     **该项目全部报价单**聚合 ✓ 见 test_subsystem_rollup_covers_every_quote_of_the_project ✓）。
 
-    但导出件是**一张报价单一份文件** ✓：同一份文件里「报价汇总」与「报价明细」都是
-    这一张单的 ✓，只有「子系统汇总」按项目级列渲染 ✗ —— 于是一张**增项单**
+    但**一张报价单一份文件 / 一个面板** ✓：同一份导出件里「报价汇总」与「报价明细」
+    都是这一张单的 ✓，只有「子系统汇总」按项目级列渲染 ✗ —— 于是一张**增项单**
     （`based_on_quote_id` 把源单明细整份复制过来 ✓）导出时，
-    「子系统汇总」= 源单 + 增项 ✗（金额直接翻倍 ✗），
-    与同一页的「报价明细」自相矛盾 ✗。
+    「子系统汇总」= 源单 + 增项 ✗（金额直接翻倍 ✗），与同一页的「报价明细」自相矛盾 ✗。
+    界面上那个「子系统汇总（可对外）」面板原先也吃项目级列 ✗ —— 同一个病 ✓。
 
-    正确语义：导出件里的每个数字都只描述**这一张报价单** ✓
+    正确语义：每个数字都只描述**这一张报价单** ✓
     —— 子系统汇总 = 本单明细按 subsystem_id 分组求和 ✓
     （设备费/安装费直接取行上的 `equipment_amount / install_amount` ✓ 与「报价明细」
      同源 ✓）+ 点位数 ✓ + 辅材费按本单各子系统 (设备费+安装费) 占比分摊 ✓
     （辅材费是**报价单级**的一笔费用 ✓，没有逐行金额 ✓；分摊之和 = 本单辅材费 ✓
      与「报价汇总」的辅材费一致 ✓）。
     项目级视图仍然由 `quotes._rollup_subsystems` 维护 ✓，本函数**不改它** ✗。
+
+    ⚠ 返回**全部**子系统（含全零的 ✓）：调用方各自决定是否把全零行藏掉 ✓
+    （导出件藏 ✗、界面面板留着 ✓ —— 界面要"没有明细的子系统也列出来，便于补齐" ✓）。
     """
     cent = Decimal("0.01")
     subs = ordered_subsystems(subsystems)
@@ -385,29 +410,54 @@ def build_quote_subsystem_rows(
 
     base = sum((eq_sum[k] + ins_sum[k] for k in eq_sum), Decimal("0"))
     aux_total = Decimal(str(auxiliary_total or 0))
-    out: list[ExportSubsystemRow] = []
+    out: list[QuoteSubsystemTotal] = []
     for s in subs:
         sid = str(getattr(s, "id", ""))
         eq = eq_sum[sid].quantize(cent, rounding=ROUND_HALF_UP)
         ins = ins_sum[sid].quantize(cent, rounding=ROUND_HALF_UP)
-        if eq + ins == 0:
-            continue                     # 全零子系统不上客户版 ✓（与项目级同一规则）
         aux = (
             (aux_total * (eq + ins) / base).quantize(cent, rounding=ROUND_HALF_UP)
             if base > 0
             else Decimal("0")
         )
         out.append(
-            ExportSubsystemRow(
-                seq=len(out) + 1,
+            QuoteSubsystemTotal(
+                subsystem_id=sid,
+                subsystem_type=str(getattr(s, "subsystem_type", "") or ""),
                 name=_s(getattr(s, "custom_name", "")) or label_of(
                     "subsystem_type", getattr(s, "subsystem_type", "")
                 ),
-                point_count=qty_text(int(pts_sum[sid])),
-                equipment=money(eq),
-                install=money(ins),
-                auxiliary=money(aux),
-                amount=money(eq + ins),
+                point_count=int(pts_sum[sid]),
+                equipment=eq,
+                install=ins,
+                auxiliary=aux,
+                amount=eq + ins,
+            )
+        )
+    return out
+
+
+def build_quote_subsystem_rows(
+    items: Iterable[Any], subsystems: Iterable[Any], auxiliary_total: Any = 0
+) -> list[ExportSubsystemRow]:
+    """把 `per_quote_subsystem_totals` 渲染成导出件要的字符串行 ✓。
+
+    本函数**不再自己求和** ✗ —— 只做 ① 藏掉全零子系统 ✓（客户版不该出现 0 元行 ✓）
+    ② 金额带千分位 ✓、点位数成文本 ✓、重排 seq ✓。
+    """
+    out: list[ExportSubsystemRow] = []
+    for t in per_quote_subsystem_totals(items, subsystems, auxiliary_total):
+        if t.amount == 0:
+            continue                     # 全零子系统不上客户版 ✓（与项目级同一规则）
+        out.append(
+            ExportSubsystemRow(
+                seq=len(out) + 1,
+                name=t.name,
+                point_count=qty_text(t.point_count),
+                equipment=money(t.equipment),
+                install=money(t.install),
+                auxiliary=money(t.auxiliary),
+                amount=money(t.amount),
             )
         )
     return out
@@ -769,8 +819,9 @@ def build_context(
 
 __all__ = [
     "ExportContext", "ExportFeeRow", "ExportItemRow", "ExportMeta", "ExportSubsystemRow",
+    "QuoteSubsystemTotal",
     "build_context", "build_fee_rows", "build_item_rows", "build_subsystem_rows",
-    "build_quote_subsystem_rows",
+    "build_quote_subsystem_rows", "per_quote_subsystem_totals",
     "money", "qty_text", "rate_pct_text",
 ]
 

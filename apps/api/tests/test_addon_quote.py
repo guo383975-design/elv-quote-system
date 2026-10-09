@@ -347,6 +347,62 @@ async def test_export_subsystem_summary_is_per_quote_not_project(
     assert per_quote[0].equipment != old[0].equipment, (per_quote, old)
 
 
+async def test_subsystem_panel_endpoint_is_per_quote_not_project(
+    client: AsyncClient, db: AsyncSession, admin_headers
+) -> None:
+    """界面上的「子系统汇总（可对外）」面板也必须吃**本单**口径 ✓（2026-10-09）。
+
+    复现（改码前）：`GET /quotes/{id}/subsystems` 直接读 `subsystems.*_subtotal` ✗
+    —— 那是**项目级**列 ✓（`_rollup_subsystems` 按项目全部报价单聚合 ✓）。
+    于是增项单的面板显示出"源单 + 增项"= 2,000.00 ✗（真值 1,000.00 ✓），
+    而同一页的「报价明细 / 报价汇总」是本单的 1,000.00 ✗ → 页面自己跟自己打架 ✗。
+    导出件上一轮已修 ✓（`build_quote_subsystem_rows` ✓），**面板当时漏了** ✗。
+
+    修复口径：面板与导出件走**同一份** `per_quote_subsystem_totals` ✓（一处算法 ✓）。
+    """
+    p = await _make_project(db)
+    sub = await _make_subsystem(db, p.id)
+    src = await _seed_source(client, admin_headers, p.id, sub.id)
+    add = await _make_addon(client, admin_headers, p.id, src["id"])
+
+    r = await client.get(f"/api/v1/quotes/{add['id']}/subsystems", headers=admin_headers)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    rows = body["subsystems"]
+    assert len(rows) == 1, rows
+    row = rows[0]
+
+    # 本单：设备 1,000 / 安装 240 / 小计 1,240 / 点位数 2（源单那一行被复制过来的一份 ✓）
+    assert row["name"] == "视频监控", row
+    assert row["equipment_subtotal"] == 1000.00, row
+    assert row["install_subtotal"] == 240.00, row
+    assert row["amount"] == 1240.00, row
+    assert row["point_count"] == 2, row
+    assert body["grand_total"] == 1240.00, body
+    assert row["share"] == 100.0, row
+
+    # ★ 关键反证：项目级列此刻是 2,000.00 ✓（两张单的聚合 ✓）——
+    #   面板给出的 1,240.00 必须**不等于**它，否则就是没修 ✓。
+    fresh = await db.get(Subsystem, sub.id)
+    await db.refresh(fresh)
+    assert dec(fresh.equipment_subtotal) == Decimal("2000.00"), fresh.equipment_subtotal
+    assert row["equipment_subtotal"] != float(fresh.equipment_subtotal), (row, fresh.equipment_subtotal)
+
+    # 面板与导出件逐项同源 ✓（同一份合计的两个渲染 ✓）
+    from app.api.v1.exports import _load_for_export
+    from app.services.export_data import build_quote_subsystem_rows
+
+    quote, _project, subsystems = await _load_for_export(db, UUID(add["id"]))
+    items = sorted(quote.items, key=lambda it: (it.sort_order or 0, str(it.id)))
+    exported = build_quote_subsystem_rows(
+        items, subsystems, auxiliary_total=quote.auxiliary_total
+    )
+    assert len(exported) == 1, exported
+    assert exported[0].equipment == "1,000.00", exported[0]
+    assert exported[0].amount == "1,240.00", exported[0]
+    assert exported[0].point_count == "2", exported[0]
+
+
 # ---------------------------------------------------------------------------
 # 承重墙：定额模式下同一笔安装钱不双计（E 线点名的"变异存活"那条）
 # ---------------------------------------------------------------------------

@@ -13,7 +13,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.api.deps import get_current_user, require_permission
-from app.core.labels import label_of
 from app.core.logging import get_logger
 from app.core.permissions import Action, can, can_see_cost, can_see_profit
 from app.core.workflow import (
@@ -1190,6 +1189,20 @@ async def subsystem_summary(
     db: Annotated[AsyncSession, Depends(get_db)],
     user: Annotated[User, Depends(require_permission("quote", "read"))],
 ) -> dict:
+    """**本单**的子系统汇总 ✓（2026-10-09 修 P2 的界面侧）。
+
+    ⚠ 这里以前读的是 `subsystems.equipment_subtotal / install_subtotal /
+    point_count` ✗ —— 那是**项目级**列 ✓（`_rollup_subsystems` 按**项目全部报价单**
+    聚合 ✓）。而调用方是「这一张报价单」的客户版面板 ✓：
+    增项单（源单明细整份复制 ✓）的面板因此显示"源单 + 增项"✗（金额翻倍 ✗），
+    与同一页的明细、以及已经修好的导出件自相矛盾 ✗。
+
+    现在与导出件**同一份算法** ✓：`export_data.per_quote_subsystem_totals` ✓
+    （导出走 `build_quote_subsystem_rows` ✓，它只是把同一份合计渲染成字符串 ✓）。
+    本接口只做"渲染成 JSON 数字 + 算占比" ✓，不再自己写第二套求和 ✗。
+    """
+    from app.services.export_data import per_quote_subsystem_totals
+
     quote = await _load_quote(db, quote_id)
     subs = list(
         (
@@ -1200,24 +1213,26 @@ async def subsystem_summary(
             )
         ).all()
     )
-    rows = []
-    grand = Decimal("0")
-    for s in subs:
-        eq = Decimal(str(s.equipment_subtotal))
-        ins = Decimal(str(s.install_subtotal))
-        amount = eq + ins
-        grand += amount
-        rows.append(
-            {
-                "subsystem_id": str(s.id),
-                "subsystem_type": str(s.subsystem_type),
-                "name": s.custom_name or label_of("subsystem_type", s.subsystem_type),
-                "point_count": s.point_count,
-                "equipment_subtotal": float(eq),
-                "install_subtotal": float(ins),
-                "amount": float(amount),
-            }
-        )
+    # 明细取**本单**的（`_load_quote` 已经 selectinload 了 items ✓，不额外查库 ✓）
+    totals = per_quote_subsystem_totals(
+        quote.items, subs, auxiliary_total=quote.auxiliary_total
+    )
+    grand = sum((t.amount for t in totals), Decimal("0"))
+    rows = [
+        {
+            "subsystem_id": t.subsystem_id,
+            "subsystem_type": t.subsystem_type,
+            "name": t.name,
+            "point_count": t.point_count,
+            "equipment_subtotal": float(t.equipment),
+            "install_subtotal": float(t.install),
+            "amount": float(t.amount),
+        }
+        # ⚠ 全零子系统**保留** ✓（与导出件的口径差异是**有意的** ✓）：
+        #   导出的客户版不该出现 0 元行 ✗，而界面面板要"没有明细的子系统也列出来 ✓
+        #   便于补齐"✓（前端也会自己补，这里保留就不必依赖前端兜底 ✓）。
+        for t in totals
+    ]
     for r in rows:
         r["share"] = round(r["amount"] / float(grand) * 100, 2) if grand else 0.0
 
