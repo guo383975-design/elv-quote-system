@@ -1022,6 +1022,40 @@ async def test_deleting_subsystem_keeps_quote_items(
     assert dec(after["equipment_total"]) == Decimal("6800.00")
 
 
+async def test_delete_subsystem_confirm_text_matches_fk_semantics() -> None:
+    """删子系统的**界面文案**必须与上面那条 FK 语义一致 ✓（2026-10-09）。
+
+    复现（改码前）：确认框写着「删除后该子系统下的明细行将一并删除」✗，
+    而实测明细行**全部存活** ✓（`quote_items.subsystem_id` 是 ON DELETE SET NULL ✓，
+    见 test_deleting_subsystem_keeps_quote_items ✓）。
+    一句吓人的错话会让人不敢动子系统 ✗ —— 文案也是行为的一部分 ✓。
+
+    这条守卫是**双向**的 ✓：既不许出现"会删除明细"的旧说法 ✗，
+    也钉死"保留 / 归属被清空"这个正确说法 ✓（改回去立刻红 ✓）。
+    顺带扫全仓的 `.vue` ✓（同一句话被复制到别处也算 ✗）。
+    """
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[3]
+    views = sorted((root / "apps/web/src").rglob("*.vue"))
+    assert views, "找不到前端源码（路径变了？）"
+
+    bad: list[tuple[str, int, str]] = []
+    for p in views:
+        for i, line in enumerate(p.read_text(encoding="utf-8").splitlines(), start=1):
+            # 只盯"明细行 + 一并删除"这个**具体**说法 ✓：删项目那边的文案
+            # 确实会连带删掉报价单（那是真的 ✓），不能一起误伤 ✗。
+            if "明细行" in line and ("一并删除" in line or "一起删除" in line):
+                bad.append((p.relative_to(root).as_posix(), i, line.strip()))
+    assert not bad, f"删子系统的文案还在说'明细行会被删'（与 ON DELETE SET NULL 不符）：{bad}"
+
+    # 正确说法必须真的在确认框里 ✓（而不是把整句删掉蒙过去 ✗）
+    editor = (root / "apps/web/src/views/SubsystemEditorView.vue").read_text(encoding="utf-8")
+    assert "明细行会保留" in editor and "子系统归属被清空" in editor, (
+        "SubsystemEditorView 的删除确认框没有说清「明细行会保留、只清空归属」"
+    )
+
+
 # ---------------------------------------------------------------------------
 # 回归：前端契约（这些字段以前被 pydantic 静默丢弃 / 缺字段导致前端崩）
 # ---------------------------------------------------------------------------
@@ -1805,7 +1839,7 @@ async def test_save_and_compute_creates_revision_incidental_writes_do_not(
 
 
 async def test_save_and_compute_skips_identical_snapshot(
-    client: AsyncClient, admin_headers
+    client: AsyncClient, db: AsyncSession, admin_headers
 ) -> None:
     """什么都没改就再点一次「保存并重算」→ 不造重复版本（用户 2026-10-08 确认的口径 ✓）。
 
@@ -1853,13 +1887,6 @@ async def test_save_and_compute_skips_identical_snapshot(
         f"/api/v1/quotes/{qid}/items/{item_id}", headers=admin_headers,
         json={"quantity": "5"},
     )).status_code == 200
-    # ⚠ 等一下再存：`quote_revisions.created_at` 的默认值是 **DB 的 CURRENT_TIMESTAMP**
-    #   （models/quote_revision.py:48），SQLite 上只有**秒**精度 ✓ ——
-    #   同一秒内落的两版时间戳会一模一样，断言"时间标记更新了"就会假失败 ✗。
-    #   生产是 PG（微秒精度 ✓），不需要等；这里只为让断言在 SQLite 上也有区分力 ✓。
-    import asyncio
-
-    await asyncio.sleep(1.1)
     r3 = await client.post(f"/api/v1/quotes/{qid}/compute", headers=admin_headers, json={})
     assert r3.status_code == 200, r3.text
     assert r3.json()["revision_saved"] is True, r3.json()
@@ -1868,14 +1895,76 @@ async def test_save_and_compute_skips_identical_snapshot(
     second_at = (await client.get(f"/api/v1/quotes/{qid}", headers=admin_headers)).json()[
         "latest_revision_at"
     ]
-    # 时间标记必须跟着**最新一版**走（取 min / 取第一版都会在这里露馅 ✓）
-    assert second_at and first_at and second_at > first_at, (first_at, second_at)
+    # 时间标记必须跟着**最新一版**走，且**不倒退** ✓
+    #   （`>=` 而不是 `>` ✗：`created_at` 走 DB 的 CURRENT_TIMESTAMP ✓，SQLite 只到秒 ✗，
+    #    同一秒里落的两版时间戳**相同是合法的** ✓ —— 旧写法正是靠 sleep 1.1 秒绕过它 ✗，
+    #    而"两版标记必须能区分"这件事下面用**钉死的时间**来断言 ✓，与真实时钟无关 ✓。）
+    assert second_at and first_at and second_at >= first_at, (first_at, second_at)
+
+    # ---- 2026-10-09：这一段以前靠"睡 1.1 秒 + 恰好同一分钟" ✗ ----
+    # 旧写法：`await asyncio.sleep(1.1)` 之后断言
+    #     second_at[:19] != first_at[:19]   （秒级标记不同）
+    #     second_at[:16] == first_at[:16]   （且落在**同一分钟**里）
+    # 它依赖**真实时钟** ✗：`quote_revisions.created_at` 走的是 DB 的 CURRENT_TIMESTAMP
+    # ✓（models/quote_revision.py ✓），第一次保存卡在 12:59:59、第二次落在 13:00:01
+    # 时，"同一分钟"这条就会假红 ✗（机器一忙、跑一次全量更明显 ✗）——
+    # 而它想证明的东西（"秒级标记能区分同一分钟内的两次保存"✓）**与现在是几点无关** ✗。
+    # 现在：先对**真实落库路径**断言"单调不减 + 两次相差 < 2 分钟"✓（不踩分/秒边界 ✓），
+    #       再把两版的 created_at **显式钉到同一分钟内的两个不同秒** ✓ ——
+    #       于是那条**真正的断言**保持满强度 ✓，且与真实时钟彻底解耦 ✓
+    #       （注入时间 ✓，不是放松断言 ✗）。
+    from datetime import UTC, datetime
+
+    def _ts(value: str) -> datetime:
+        return datetime.fromisoformat(value)
+
+    def _naive(value: str) -> datetime:
+        """比较用：SQLite 读回的 DateTime(timezone=True) 是 **naive** ✓（PG 带时区 ✓），
+        直接比 aware/naive 会永远不等 ✗ —— 这里统一去掉时区再比 ✓（比较的是同一时刻 ✓）。"""
+        return _ts(value).replace(tzinfo=None)
+
+    real_delta = (_ts(second_at) - _ts(first_at)).total_seconds()
+    assert 0 <= real_delta < 120, (first_at, second_at)
+
+    # 钉时间：v1 = 15:33:06、v2 = 15:33:07（**同一分钟**、差 1 秒 ✓）
+    from uuid import UUID as _UUID
+
+    from app.models.quote_revision import QuoteRevision
+
+    revisions = (
+        await client.get(f"/api/v1/quotes/{qid}/revisions", headers=admin_headers)
+    ).json()
+    assert len(revisions) == 2, revisions
+    by_seq = {r["seq"]: r for r in revisions}
+    pinned = {
+        1: datetime(2026, 10, 8, 15, 33, 6, tzinfo=UTC),
+        2: datetime(2026, 10, 8, 15, 33, 7, tzinfo=UTC),
+    }
+    for seq, when in pinned.items():
+        row = await db.get(QuoteRevision, _UUID(by_seq[seq]["id"]))
+        assert row is not None, seq
+        row.created_at = when
+    await db.commit()
+
+    # 钉完之后**重新取**：断言用的是接口现在真正读到的值 ✓（不是钉之前的缓存值 ✗）
+    pinned_rows = {
+        r["seq"]: r
+        for r in (
+            await client.get(f"/api/v1/quotes/{qid}/revisions", headers=admin_headers)
+        ).json()
+    }
+    pinned_first, pinned_second = pinned_rows[1]["created_at"], pinned_rows[2]["created_at"]
+    detail = (await client.get(f"/api/v1/quotes/{qid}", headers=admin_headers)).json()
+    assert detail["latest_revision_at"] is not None, detail
+
     # ★ 用户 2026-10-08 的验收标准：**同一分钟内**保存两次，秒级标记必须不同 ✓。
     #   `[:19]` 就是 ISO 的秒级部分（YYYY-MM-DDTHH:MM:SS）—— 与界面/导出件的
     #   `YYYY-MM-DD HH:MM:SS` 逐位对应 ✓（时区换算不会改变"两个时刻是否相同"✓）。
-    assert second_at[:19] != first_at[:19], (first_at, second_at)
-    #   同分钟（前 16 位 YYYY-MM-DDTHH:MM）—— 说明区分两个版本靠的正是**秒** ✓
-    assert second_at[:16] == first_at[:16], (first_at, second_at)
+    assert pinned_first[:16] == "2026-10-08T15:33", pinned_first
+    assert pinned_second[:16] == "2026-10-08T15:33", pinned_second
+    assert pinned_second[:19] != pinned_first[:19], (pinned_first, pinned_second)
+    # 详情报的必须是**最新那一版**（取 min / 取第一版 → 这里立刻红 ✓）
+    assert _naive(detail["latest_revision_at"]) == _naive(pinned_second), (detail, pinned_second)
 
     reasons = [
         r["reason"]

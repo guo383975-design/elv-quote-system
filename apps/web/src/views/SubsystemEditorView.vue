@@ -10,7 +10,8 @@
  *   GET  /projects/{id}/subsystems     列出该项目全部子系统
  *   POST /subsystems                   新建（payload 含 project_id / subsystem_type / supplier_id 可选）
  *   PATCH /subsystems/{id}             改名 / 排序 / 改供货商
- *   DELETE /subsystems/{id}            删除（子表会一并删）
+ *   DELETE /subsystems/{id}            删除（**只解除明细行归属，不删明细行** ——
+ *                                      quote_items.subsystem_id 是 ON DELETE SET NULL ✓）
  *
  * 2026-09-29 接通 supplier 下拉：子系统表里 supplier_id 列已有（FK → suppliers.id），
  * 此前 UI 只读不写。现在弹窗里加了「供货商」下拉，新建/编辑都能挂/改。
@@ -163,7 +164,7 @@ async function save(): Promise<void> {
 async function remove(row: Subsystem): Promise<void> {
   const name = row.custom_name || meta.label('subsystem_type', row.subsystem_type)
   await ElMessageBox.confirm(
-    `确认删除子系统「${name}」？删除后该子系统下的明细行将一并删除。`,
+    `确认删除子系统「${name}」？删除后该子系统下的明细行会保留，但其子系统归属被清空。`,
     '高危操作',
     { confirmButtonText: '确认删除', cancelButtonText: '取消', type: 'warning' },
   )
