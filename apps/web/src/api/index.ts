@@ -585,7 +585,13 @@ export const quoteApi = {
     clauses_overridden: boolean
     valid_days_overridden: boolean
     valid_days: number
-    company?: { name: string; address: string; phone: string; email: string } | null
+    company?: {
+      name: string
+      address: string
+      phone: string
+      email: string
+      letterheads?: string[]
+    } | null
   }> {
     const { data } = await http.get<{
       clauses: string[]
@@ -595,7 +601,13 @@ export const quoteApi = {
       clauses_overridden: boolean
       valid_days_overridden: boolean
       valid_days: number
-      company?: { name: string; address: string; phone: string; email: string } | null
+      company?: {
+        name: string
+        address: string
+        phone: string
+        email: string
+        letterheads?: string[]
+      } | null
     }>(
       `/quotes/${quoteId}/export-clauses`,
     )
@@ -715,7 +727,18 @@ export const pointTemplateApi = {
 // ---------------------------------------------------------------------------
 
 export interface AppSettings {
-  company: { name: string; address: string; phone: string; email: string }
+  company: {
+    name: string
+    address: string
+    phone: string
+    email: string
+    /**
+     * 公司抬头库（2026-10-09）：报价单可选用的**其它公司名称**，3~5 个。
+     * 这是**候选名单**，不是"当前生效的抬头"；单据上存的是当时选定的字符串本身。
+     * 空 = 只有 `name`，行为与加这个功能之前完全一致。
+     */
+    letterheads?: string[]
+  }
   /**
    * 数据可见性（2026-10-05）：按角色配"能否看成本/利润"。
    * 后端 core/visibility 判定，保存后立即生效。

@@ -492,6 +492,15 @@ export interface Quote {
    * 为空 = 继承「系统设置」；有效期的取值链见 utils/quoteValidity.ts。
    */
   terms_override?: Record<string, number | string> | null
+  /**
+   * 本单选用的**公司抬头**（2026-10-09）。
+   *
+   * ⚠ 存的是**当时选定的那个公司名字符串本身**，不是抬头库里的一个 id/下标
+   * —— 这是**天然快照**：以后改/删系统设置里的抬头库，**不会**追溯改写
+   * 已开出的报价单 ✓（"历史单据绝不跟着变"）。
+   * `null` / 空 = 用「系统设置 → 公司名称」（当前是「XX科技有限公司」）。
+   */
+  company_name?: string | null
   /** 安装单价方式：manual=手填（缺省）/ quota=套定额 */
   install_mode?: string
   customer_name: string | null

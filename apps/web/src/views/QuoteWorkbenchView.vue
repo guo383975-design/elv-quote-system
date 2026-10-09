@@ -964,8 +964,11 @@ async function loadClauses(): Promise<void> {
       tax_method?: string
       tax_rate?: number | string
       labor_float_rate?: number | string
+      company_name?: string | null
     } | null
     if (q) {
+      // 公司抬头 ✓：本单存的就是当时选定的**名字本身** ✓（没存 = 用系统设置 ✓）
+      letterheadDraft.value = (q.company_name ?? '') || ''
       if (q.tax_method) taxMethodDraft.value = q.tax_method
       if (q.tax_rate !== undefined && q.tax_rate !== null) {
         taxRateDraft.value = Number(q.tax_rate) * 100        // 存的是比率 ✓ 显示百分数 ✓
@@ -994,13 +997,38 @@ const termsDraft = reactive({
 /** 后台维护的标准条款（可勾选 ✓） */
 const standardClauses = ref<string[]>([])
 
+/** 公司抬头库（2026-10-09）：系统设置里维护的**候选**公司名称 ✓（3~5 个 ✓）。 */
+const letterheads = ref<string[]>([])
+/** 本单选用的公司抬头 ✓。`''` = 「默认（系统设置）」= 用系统设置里的公司名称 ✓
+ *  （当前是「XX科技有限公司」，也就是加这个功能之前的行为 ✓）。 */
+const letterheadDraft = ref<string>('')
+
+/** 下拉选项：第一项「默认（系统设置）」= 空值（模板里写死 ✓）；
+ *  抬头库里没有、但**本单已经存着**的名字也要列出来 ✓ ——
+ *  否则用户一打开弹窗，下拉里找不到当前值会显示成空 ✗，
+ *  再点一次「保存」就把这张单的抬头**悄悄改成默认**了 ✗
+ *  （等于追溯改写了历史单据 ✗，正是本功能最要避免的那件事）。 */
+const letterheadOptions = computed(() => {
+  const out = letterheads.value.map((n) => String(n).trim()).filter(Boolean)
+  const cur = letterheadDraft.value.trim()
+  if (cur && !out.includes(cur)) out.push(cur)
+  return out
+})
+
 async function loadStandardClauses(): Promise<void> {
   try {
     const { data } = await http.get('/settings')
-    const q = ((data as Record<string, any>)?.quote ?? {}) as Record<string, unknown>
+    const d = (data ?? {}) as Record<string, any>
+    const q = (d.quote ?? {}) as Record<string, unknown>
     standardClauses.value = ((q.clauses ?? []) as unknown[]).map((c) => String(c))
+    // 公司抬头库 ✓（和标准条款同一次请求拿回来 ✓，不用再打一次 /settings ✓）
+    const co = (d.company ?? {}) as Record<string, unknown>
+    letterheads.value = ((co.letterheads ?? []) as unknown[])
+      .map((n) => String(n).trim())
+      .filter(Boolean)
   } catch {
     standardClauses.value = []      // 拿不到就不显示勾选清单 ✓，手写条款照常可用 ✓
+    letterheads.value = []          // 抬头库拿不到 → 下拉只剩「默认（系统设置）」✓ 不崩 ✓
   }
 }
 
@@ -1068,6 +1096,10 @@ async function saveClauses(): Promise<void> {
       valid_days_override: useOwnClauses.value ? validDaysDraft.value : null,
       // 每单数字 ✓：勾了"本单自选"才写 ✓（否则清空覆盖 ✓，回到系统设置 ✓）
       terms_override: useOwnClauses.value ? termsOverride : null,
+      // 公司抬头（2026-10-09）✓：存**名字本身** ✓（不是抬头库的下标/id ✓）
+      //   —— 这样以后改/删抬头库，已开出的单**不会**被追溯改写 ✓（天然快照 ✓）。
+      //   空 → null ✓ = 回落「系统设置 → 公司名称」✓（老单 behavior 不变 ✓）。
+      company_name: letterheadDraft.value.trim() || null,
       // 策略三项（用户决策 ④ ✓）：一直可改 ✓
       tax_method: taxMethodDraft.value,
       tax_rate: Number(taxRateDraft.value) / 100,
@@ -2240,6 +2272,36 @@ const clausesVisible = ref(false)
                 <div class="st-term">
                   <span>人工费浮动（%）</span>
                   <el-input-number v-model="laborFloatDraft" :min="-50" :max="200" :precision="0" size="small" />
+                </div>
+              </div>
+            </div>
+            <!-- 公司抬头（2026-10-09）：有时要用**别家公司抬头**去报价 ✓。
+                 只选**公司名称**一个字段 ✓ —— 地址/电话/邮箱/税号/Logo/盖章位不在这里 ✓。 -->
+            <div class="mb" style="border-top: 1px dashed var(--el-border-color); padding-top: 8px">
+              <div class="text-muted" style="margin-bottom: 4px">
+                公司抬头（本单生效 ✓，与条款一起在「保存条款设置」时提交 ✓）：
+              </div>
+              <div class="st-terms">
+                <div class="st-term">
+                  <span>公司抬头</span>
+                  <el-select
+                    v-model="letterheadDraft"
+                    size="small"
+                    style="width: 300px"
+                    :disabled="!canEdit"
+                    placeholder="默认（系统设置）"
+                  >
+                    <el-option label="默认（系统设置）" value="" />
+                    <el-option v-for="n in letterheadOptions" :key="n" :label="n" :value="n" />
+                  </el-select>
+                </div>
+                <div class="text-muted" style="grid-column: 1 / -1; font-size: 12px">
+                  客户版 PDF / 内部版 PDF / Excel / 客户预览页的抬头**都取这一处** ✓。
+                  本单记的是**当时选定的公司名本身** ✓ —— 以后改/删抬头库，这张单
+                  **不会**被追溯改写 ✓（历史单据绝不跟着变 ✓）。
+                  <template v-if="!letterheads.length">
+                    <br />抬头库还是空的：去「系统设置 → 公司信息」里加几个可选公司名 ✓。
+                  </template>
                 </div>
               </div>
             </div>

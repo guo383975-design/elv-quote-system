@@ -294,7 +294,16 @@ const loading = ref(false)
 const saving = ref(false)
 const canUpdate = computed(() => auth.can('setting', 'update'))
 
-const company = reactive({ name: '', address: '', phone: '', email: '' })
+const company = reactive({
+  name: '',
+  address: '',
+  phone: '',
+  email: '',
+  /** 公司抬头库（2026-10-09）：报价单可选用的**其它公司名称**（建议 3~5 个）。
+   *  这是**候选名单**，不是"当前生效的抬头" —— 单据上存的是当时选定的名字本身，
+   *  所以在这里改/删**不会**追溯改写已开出的报价单 ✓。 */
+  letterheads: [] as string[],
+})
 const quote = reactive({
   valid_days: 30,
   // 条款里用到的数字（2026-10-05 起结构化）：条款文本用 {变量} 引用它们，
@@ -591,6 +600,7 @@ async function load(): Promise<void> {
       address: s.company.address ?? '',
       phone: s.company.phone ?? '',
       email: s.company.email ?? '',
+      letterheads: [...(s.company.letterheads ?? [])],
     })
     quote.valid_days = s.quote.valid_days ?? 30
   quote.prepay_ratio = s.quote.prepay_ratio ?? 30
@@ -626,9 +636,33 @@ function moveClause(idx: number, delta: number): void {
   quote.clauses.splice(target, 0, row)
 }
 
+/** 公司抬头库（2026-10-09）：去空、去重（与后端同一套规则 ✓）——
+ *  前端先拦住是为了给个**当场看得懂**的提示 ✓，而不是保存后吃 422 ✓。 */
+const cleanedLetterheads = computed(() => {
+  const out: string[] = []
+  for (const raw of company.letterheads) {
+    const n = String(raw ?? '').trim()
+    if (!n || out.includes(n)) continue
+    out.push(n)
+  }
+  return out
+})
+
 async function save(): Promise<void> {
   if (!company.name.trim()) {
     ElMessage.warning('公司名称不能为空 —— 它是客户版 PDF 的抬头')
+    return
+  }
+  // 抬头库（2026-10-09）：上限与后端 services/settings.py 的 MAX_LETTERHEADS /
+  // MAX_LETTERHEAD_LEN 保持一致（后端仍会再校验一次 ✓，前端这层只是提示更友好 ✓）。
+  const heads = cleanedLetterheads.value
+  if (heads.length > 20) {
+    ElMessage.warning('公司抬头最多 20 个')
+    return
+  }
+  const tooLong = heads.find((n) => n.length > 255)
+  if (tooLong) {
+    ElMessage.warning(`公司抬头过长（最多 255 字）：${tooLong.slice(0, 20)}…`)
     return
   }
   if (!quote.valid_days || quote.valid_days < 1) {
@@ -648,6 +682,8 @@ async function save(): Promise<void> {
         address: company.address.trim(),
         phone: company.phone.trim(),
         email: company.email.trim(),
+        // 公司抬头库（2026-10-09）：**净化后**再提交 ✓（去空去重 ✓）
+        letterheads: heads,
       },
       quote: {
         valid_days: quote.valid_days,
@@ -725,6 +761,41 @@ function reset(): void {
             </el-form-item>
           </el-col>
         </el-row>
+
+        <!-- 公司抬头库（2026-10-09）：有时要用**别家公司抬头**去报价 ✓。
+             只存**公司名称** ✓ —— 地址/电话/邮箱/税号/Logo/盖章位一律不进这里 ✓。
+             这里是"候选名单"：改/删它**不会**追溯改写已开出的报价单 ✓。 -->
+        <el-form-item label="公司抬头库">
+          <div style="width: 100%">
+            <div
+              v-for="(_n, i) in company.letterheads"
+              :key="i"
+              style="display: flex; gap: 8px; align-items: center; margin-bottom: 6px"
+            >
+              <el-input
+                v-model="company.letterheads[i]"
+                maxlength="255"
+                placeholder="例如：浙江某某科技有限公司"
+                style="max-width: 420px"
+              />
+              <el-button link type="danger" @click="company.letterheads.splice(i, 1)">删</el-button>
+            </div>
+            <el-button
+              size="small"
+              :disabled="company.letterheads.length >= 20"
+              @click="company.letterheads.push('')"
+            >
+              + 加一个抬头
+            </el-button>
+            <div class="text-muted" style="margin-top: 6px; font-size: 12px">
+              报价时可在「报价条款」弹窗里选用（建议 3~5 个 ✓）。
+              每张报价单记的是**当时选定的那个公司名本身** ✓ ——
+              所以在这里改 / 删名字，**已开出的报价单不会被追溯改写** ✓
+              （不选 = 用上面的「公司名称」✓）。
+              <span v-if="company.letterheads.length">　当前 {{ company.letterheads.length }} 个</span>
+            </div>
+          </div>
+        </el-form-item>
       </el-form>
       <div class="text-muted st-preview">
         预览效果：<b>{{ company.name || '（未填）' }}</b>

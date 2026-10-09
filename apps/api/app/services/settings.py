@@ -46,6 +46,11 @@ DEFAULT_SUBSYSTEMS: list[str] = [
     "info_publish",         # 信息发布
 ]
 
+# 公司抬头库的规模上限（2026-10-09）。实际需求是 3~5 家，这里放宽到 20 是为了
+# 不把用户卡死；**必须**有上限：这个值会原样进导出文件与预览页。
+MAX_LETTERHEADS = 20
+MAX_LETTERHEAD_LEN = 255
+
 DEFAULTS: dict[str, Any] = {
     # 自定义角色（2026-10-05）：内置角色不在这里，见 core/roles.py
     K_ROLES: {"custom": []},
@@ -57,6 +62,12 @@ DEFAULTS: dict[str, Any] = {
         "address": "宁波市鄞州区 XX 路 88 号",
         "phone": "0574-8888 8888",
         "email": "sales@xxzn.com",
+        # 公司抬头库（2026-10-09）：有时要用**别家公司抬头**去报价。
+        # ⚠ 这里是**候选名单**，不是"当前生效的抬头"。单据上存的是当时选定的
+        #   那个公司名**字符串本身**（天然快照）—— 所以改/删这份名单
+        #   **不会**追溯改写已开出的报价单 ✓（历史单据绝不跟着变）。
+        # 空 = 只有系统设置里的 `name`（= XX科技），行为与加这个功能之前完全一致。
+        "letterheads": [],
     },
     K_PROJECT: {
         # 新建项目时自动创建的专业（值 = SubsystemType 的值，顺序即 sort_order）

@@ -18,6 +18,8 @@ from app.core.logging import get_logger
 from app.db.session import get_db
 from app.models.user import User
 from app.services.settings import (
+    MAX_LETTERHEAD_LEN,
+    MAX_LETTERHEADS,
     load_settings,
     redact_settings,
     save_settings,
@@ -63,7 +65,8 @@ async def get_settings(
 async def _validate_settings_patch(db: AsyncSession, body: dict) -> None:
     """保存前的全部校验。**PATCH 与导入都走这里** —— 两条路各写一套迟早漂移。
 
-    校验不过就抛 422，并且**不改动 body**（除了把 roles.custom 换成净化后的版本）。
+    校验不过就抛 422，并且**不改动 body**（除了把 roles.custom / company.letterheads
+    换成净化后的版本）。
     """
     # 条款里的 {变量} 必须都在定义表里 —— 写错了直接 422，
     # 而不是把 `{valid_dayss}` 原样发给客户（这种错人工几乎不可能发现）。
@@ -168,6 +171,45 @@ async def _validate_settings_patch(db: AsyncSession, body: dict) -> None:
                     detail=f"这些角色还有人在用，先把他们改成别的角色：{detail}",
                 )
         body["roles"] = {**roles_patch, "custom": cleaned}
+
+    # 公司抬头库（2026-10-09）：报价单可选用哪家公司的名字报价。
+    # 这里只维护**候选名单**。单据上存的是当时选定的那个公司名**字符串本身**
+    # （天然快照），所以改/删这份名单**不会**追溯改写已开出的报价单 ——
+    # 这正是"历史单据绝不跟着变"的实现方式 ✓。
+    # 净化动作：去空、去重、限长、限量；空串直接丢掉（前端多留一行空输入框
+    # 不该报错），但**类型错**要拦（数组里混进数字/对象是接口误用）。
+    company_patch = body.get("company")
+    if isinstance(company_patch, dict) and "letterheads" in company_patch:
+        raw = company_patch.get("letterheads")
+        if raw is None:
+            raw = []
+        if not isinstance(raw, list):
+            raise HTTPException(status_code=422, detail="company.letterheads 必须是数组")
+        cleaned_letterheads: list[str] = []
+        for item in raw:
+            if not isinstance(item, str):
+                raise HTTPException(
+                    status_code=422, detail="company.letterheads 里每一项都必须是字符串"
+                )
+            name = item.strip()
+            if not name:
+                continue
+            if len(name) > MAX_LETTERHEAD_LEN:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"公司抬头过长（最多 {MAX_LETTERHEAD_LEN} 字）：{name[:20]}…",
+                )
+            if name not in cleaned_letterheads:
+                cleaned_letterheads.append(name)
+        if len(cleaned_letterheads) > MAX_LETTERHEADS:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"公司抬头最多 {MAX_LETTERHEADS} 个"
+                    f"（当前 {len(cleaned_letterheads)} 个）"
+                ),
+            )
+        body["company"] = {**company_patch, "letterheads": cleaned_letterheads}
 
 
 def _refresh_runtime_caches(saved: dict) -> None:
