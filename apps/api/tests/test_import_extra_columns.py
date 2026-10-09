@@ -178,7 +178,7 @@ async def test_status_supplier_replacement_land_on_commit(
     # 报告写进了导入批次 ✓（事后能查"这一批的状态是怎么来的" ✓）
     batch = (
         await client.get(
-            f"/api/v1/imports/batches", headers=admin_headers, params={"kind": "device"}
+            "/api/v1/imports/batches", headers=admin_headers, params={"kind": "device"}
         )
     ).json()["items"][0]
     assert batch["batch_no"] == result["batch_no"], batch
