@@ -13,7 +13,15 @@ from app.models.ai import (
     AiTask,
     AiUsageLog,
 )
-from app.models.audit import AuditAction, LoginAuditLog, ProjectAuditLog, QuoteAuditLog
+from app.models.audit import (
+    AuditAction,
+    DeviceAuditAction,
+    DeviceAuditEntity,
+    DeviceAuditLog,
+    LoginAuditLog,
+    ProjectAuditLog,
+    QuoteAuditLog,
+)
 from app.models.customer import Customer
 from app.models.department import Department
 from app.models.device import (
@@ -82,6 +90,9 @@ __all__ = [
     "ItemSource",
     "QuoteAuditLog",
     "ProjectAuditLog",
+    "DeviceAuditLog",
+    "DeviceAuditEntity",
+    "DeviceAuditAction",
     "AiConversation",
     "AiMessage",
     "AiMessageRole",

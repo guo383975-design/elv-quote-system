@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
-from typing import Annotated
+from typing import Annotated, Any
 from urllib.parse import quote as urlquote
 from uuid import UUID
 
@@ -19,6 +19,7 @@ from app.core.logging import get_logger
 from app.core.permissions import can_see_cost
 from app.db.session import get_db
 from app.db.types import drop_none_for_not_null
+from app.models.audit import DeviceAuditAction, DeviceAuditEntity
 from app.models.device import (
     Device,
     DeviceAccessoryGroup,
@@ -47,12 +48,52 @@ from app.schemas import (
     PriceTierIn,
     PriceTierOut,
 )
+from app.services.audit import device_audit, field_changes
 from app.services.device_match import MatchCandidate, match_device, suggest_replacements
 from app.services.excel_io import DEVICE_TEMPLATE_COLUMNS
 from app.services.pricing import floor_from_cost
+from app.services.xlsx_safe import append_row
 
 router = APIRouter(prefix="/devices", tags=["设备库"])
 log = get_logger("api.devices")
+
+
+# ---------------------------------------------------------------------------
+# 设备库留痕（2026-10-09）
+# ---------------------------------------------------------------------------
+# 以前设备库是唯一**没有留痕**的写入口 ✗：改一台设备的进价 / 把型号标停产 /
+# 停用一台设备，事后答不上"谁、什么时候、改前是什么"✗ —— 而这些值直接决定
+# 报价的成本与毛利 ✗。现在按下面这份字段清单逐字段记 before→after ✓。
+#
+# 为什么是"字段清单"而不是"整行快照"✗：整行快照把 20 多个字段全塞进 JSON，
+# 事后要自己一格一格对比；只记**真变了的**关键字段，一眼就能读出这次改了什么 ✓。
+_AUDITED_DEVICE_FIELDS: tuple[str, ...] = (
+    "code", "name", "brand", "model", "spec", "unit",
+    "category", "category_id",
+    "reference_price", "cost_price", "install_unit_price", "min_price",
+    "status", "is_active", "is_owner_supplied", "is_common",
+    "supplier_id", "replacement_id", "eol_at",
+    "moq", "warranty_years", "description",
+)
+
+# 新增场景：以"全 None"作前值 → field_changes 会把有值的字段记成 None→值 ✓
+# （对新增来说这就是"初始值"✓，而不是把 code=null 也记一条 ✗）。
+_EMPTY_DEVICE_SNAPSHOT: dict[str, Any] = dict.fromkeys(_AUDITED_DEVICE_FIELDS)
+
+_AUDITED_CATEGORY_FIELDS: tuple[str, ...] = (
+    "code", "name", "parent_id", "sort_order", "is_active",
+    "legacy_enum", "code_prefix", "notes",
+)
+_EMPTY_CATEGORY_SNAPSHOT: dict[str, Any] = dict.fromkeys(_AUDITED_CATEGORY_FIELDS)
+
+
+def _device_snapshot(device: Device) -> dict[str, Any]:
+    return {f: getattr(device, f, None) for f in _AUDITED_DEVICE_FIELDS}
+
+
+def _category_snapshot(node: DeviceCategoryNode) -> dict[str, Any]:
+    return {f: getattr(node, f, None) for f in _AUDITED_CATEGORY_FIELDS}
+
 
 
 # ---------------------------------------------------------------------------
@@ -405,6 +446,21 @@ async def devices_from_quote_items(
         db.add(device)
         await db.flush()
         existing[_key(device.brand, device.model)] = device
+        # 留痕：这条路径也是"新增设备" ✓（从报价行收录 ✓）——
+        # 不记的话它就成了绕过留痕的后门 ✗（界面上的「复制到系统」按钮走的就是它 ✓）。
+        db.add(
+            device_audit(
+                entity=DeviceAuditEntity.DEVICE,
+                action=DeviceAuditAction.CREATE,
+                entity_id=device.id,
+                code=device.code,
+                name=device.name,
+                user_id=user.id,
+                username=user.username,
+                changes=field_changes(_EMPTY_DEVICE_SNAPSHOT, _device_snapshot(device)),
+                summary=f"从报价行收录设备 {device.code} {device.name}",
+            )
+        )
         created.append({"item_id": str(item.id), "device_id": str(device.id),
                         "code": device.code, "name": device.name,
                         "reference_price": float(device.reference_price or 0)})
@@ -471,6 +527,29 @@ async def bulk_price(
         total_after += after
         if not body.dry_run:
             setattr(d, body.field, after)
+            # 留痕：**批量调价也是改价** ✓ —— 不记的话"把 2000 台设备整体上调 5%"
+            # 就是留痕里最大的一个黑洞 ✗（比逐台改价还危险 ✗）。
+            # 逐台一行 ✓：事后要能回答"这台设备的价是谁改成这个数的" ✓。
+            # `dry_run=True`（预览）**不记** ✗ —— 没落库的动作不是变更 ✓。
+            fields = field_changes({body.field: before}, {body.field: after})
+            if fields:
+                db.add(
+                    device_audit(
+                        entity=DeviceAuditEntity.DEVICE,
+                        action=DeviceAuditAction.UPDATE,
+                        entity_id=d.id,
+                        code=d.code,
+                        name=d.name,
+                        user_id=user.id,
+                        username=user.username,
+                        changes=fields,
+                        summary=(
+                            f"批量调价（{body.mode} {body.value}）{d.code} {d.name}："
+                            f"{body.field} {fields[0]['from']} → {fields[0]['to']}"
+                            + ("（负值已夹到 0）" if clamped else "")
+                        ),
+                    )
+                )
 
     if not body.dry_run:
         await db.commit()
@@ -536,10 +615,12 @@ async def export_devices(
     wb = Workbook()
     ws = wb.active
     ws.title = "设备库"
-    ws.append(list(DEVICE_TEMPLATE_COLUMNS))
+    # append_row（而非 ws.append）：设备名/品牌/型号/供应商都是外来文本，
+    # 以 = 开头时不能被 Excel 当公式求值（见 services/xlsx_safe.py）
+    append_row(ws, DEVICE_TEMPLATE_COLUMNS)
     for d in devices:
         repl = replacements.get(d.replacement_id) if d.replacement_id else None
-        ws.append([
+        append_row(ws, [
             d.name,
             d.brand or "",
             d.model or "",
@@ -767,6 +848,20 @@ async def create_category(
     db.add(node)
     await db.flush()
     await db.refresh(node)
+    # 留痕：分类树是设备归属与编号前缀的来源 ✓，动它同样要能追溯 ✓
+    db.add(
+        device_audit(
+            entity=DeviceAuditEntity.CATEGORY,
+            action=DeviceAuditAction.CATEGORY_CREATE,
+            entity_id=node.id,
+            code=node.code,
+            name=node.name,
+            user_id=user.id,
+            username=user.username,
+            changes=field_changes(_EMPTY_CATEGORY_SNAPSHOT, _category_snapshot(node)),
+            summary=f"新增设备分类 {node.code} {node.name}",
+        )
+    )
     log.info(f"新增设备分类节点 {node.code} {node.name}")
     return _node_out(node, {**by_id, node.id: node})
 
@@ -787,6 +882,8 @@ async def update_category(
         raise HTTPException(status_code=404, detail="分类节点不存在")
     by_id = await _load_category_nodes(db)
     data = body.model_dump(exclude_unset=True)
+    # 留痕的"改前"快照必须在下面 setattr **之前**取 ✓
+    before = _category_snapshot(node)
 
     if "parent_id" in data:
         new_parent = data["parent_id"]
@@ -816,6 +913,26 @@ async def update_category(
     # 结构变了 → 子树下所有设备的 devices.category 要跟着新的一级分类走
     await _resync_device_categories(db, _descendant_ids(node.id, by_id))
     await db.refresh(node)
+    # 留痕：改名/挪位置/停用都要留痕 ✓（挪节点会连带改写子树下设备的一级分类 ✓，
+    # 只记"谁动过分类树"是不够的 ✓ —— 所以 before→after 里带着 parent_id 与 is_active ✓）
+    changes = field_changes(before, _category_snapshot(node))
+    if changes:
+        db.add(
+            device_audit(
+                entity=DeviceAuditEntity.CATEGORY,
+                action=DeviceAuditAction.CATEGORY_UPDATE,
+                entity_id=node.id,
+                code=node.code,
+                name=node.name,
+                user_id=user.id,
+                username=user.username,
+                changes=changes,
+                summary=(
+                    f"修改设备分类 {node.code} {node.name}："
+                    + "、".join(str(c["field"]) for c in changes)
+                ),
+            )
+        )
     fresh = await _load_category_nodes(db)
     used = await db.scalar(
         select(func.count())
@@ -948,6 +1065,21 @@ async def delete_category(
             status_code=409,
             detail=f"该分类下还有 {used} 台设备，请先把设备改到其他分类",
         )
+    # 留痕：**先记再删** ✓（`db.delete` 之后 ORM 实例就不该再读了 ✓；
+    # 而且 entity_id 刻意没有外键 ✓ —— 分类被删掉，这条痕照样活着 ✓）
+    db.add(
+        device_audit(
+            entity=DeviceAuditEntity.CATEGORY,
+            action=DeviceAuditAction.CATEGORY_DELETE,
+            entity_id=node.id,
+            code=node.code,
+            name=node.name,
+            user_id=user.id,
+            username=user.username,
+            changes=[{"field": "deleted", "from": None, "to": f"{node.code} {node.name}"}],
+            summary=f"删除设备分类 {node.code} {node.name}",
+        )
+    )
     await db.delete(node)
     log.warning(f"删除设备分类节点 {node.code} {node.name} by {user.username}")
 
@@ -1011,6 +1143,20 @@ async def create_device(
     db.add(device)
     await db.flush()
     await db.refresh(device)
+    # 留痕（与本次写入同一个事务 ✓）：新增也要记 —— "这台设备是谁建的"同属可追溯范围 ✓
+    db.add(
+        device_audit(
+            entity=DeviceAuditEntity.DEVICE,
+            action=DeviceAuditAction.CREATE,
+            entity_id=device.id,
+            code=device.code,
+            name=device.name,
+            user_id=user.id,
+            username=user.username,
+            changes=field_changes(_EMPTY_DEVICE_SNAPSHOT, _device_snapshot(device)),
+            summary=f"新增设备 {device.code} {device.name}",
+        )
+    )
     log.info(f"新增设备 {device.code} {device.name}")
     nodes = await _load_category_nodes(db)
     return _device_out_for_view(
@@ -1060,6 +1206,8 @@ async def update_device(
         raise HTTPException(status_code=404, detail="设备不存在")
 
     data = drop_none_for_not_null(Device, body.model_dump(exclude_unset=True))
+    # 留痕的"改前"快照必须在 setattr **之前**取 ✓（放到后面取到的就是改后的值 ✗）
+    before = _device_snapshot(device)
     # 设备底价规则（2026-10-05）：改了成本价、且这次没显式给底价 → 底价跟着重算
     # （显式给了底价就以调用方的为准：个别机型确实是特例）
     if "cost_price" in data and "min_price" not in data:
@@ -1084,6 +1232,29 @@ async def update_device(
     await db.flush()
     await db.refresh(device)
 
+    # 留痕：只记**真变了的**关键字段 ✓（空改动不写一行噪声 ✗ ——
+    # 界面上的"保存"按钮很轻，无脑点两次不该在留痕里长出两条一样的记录 ✗）。
+    # ⚠ 重新启用（PATCH is_active=true）也走这里 ✓ → 记成 is_active false→true ✓，
+    #   与"停用"（DELETE → action=delete ✓）配对，能看出完整的启用/停用历史 ✓。
+    changes = field_changes(before, _device_snapshot(device))
+    if changes:
+        db.add(
+            device_audit(
+                entity=DeviceAuditEntity.DEVICE,
+                action=DeviceAuditAction.UPDATE,
+                entity_id=device.id,
+                code=device.code,
+                name=device.name,
+                user_id=user.id,
+                username=user.username,
+                changes=changes,
+                summary=(
+                    f"修改设备 {device.code} {device.name}："
+                    + "、".join(str(c["field"]) for c in changes)
+                ),
+            )
+        )
+
     # 设为停产/临近停产但没填替代型号 → 提示（不阻断）
     if device.status in (DeviceStatus.EOL, DeviceStatus.NEAR_EOL) and not device.replacement_id:
         log.warning(f"设备 {device.code} 标记为 {device.status} 但未指定替代型号")
@@ -1106,7 +1277,24 @@ async def deactivate_device(
     device = await db.get(Device, device_id)
     if not device:
         raise HTTPException(status_code=404, detail="设备不存在")
-    device.is_active = False
+    # 留痕：只在**状态真的变了**时记一条 ✓（连点两次"停用"不该长出两条一样的痕 ✗）。
+    # action 用既有的 `delete` ✓ —— 接口本身就是 DELETE ✓，停用是软删 ✓；
+    # 复用同一个取值，跨表按 `action=delete` 筛选时能一起捞出来 ✓。
+    if device.is_active:
+        device.is_active = False
+        db.add(
+            device_audit(
+                entity=DeviceAuditEntity.DEVICE,
+                action=DeviceAuditAction.DELETE,
+                entity_id=device.id,
+                code=device.code,
+                name=device.name,
+                user_id=user.id,
+                username=user.username,
+                changes=[{"field": "is_active", "from": True, "to": False}],
+                summary=f"停用设备 {device.code} {device.name}",
+            )
+        )
     log.warning(f"停用设备 {device.code}")
 
 
