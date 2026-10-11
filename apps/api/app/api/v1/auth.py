@@ -16,6 +16,7 @@ from app.api.deps import get_current_user
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.core.permissions import Role, visible_resources
+from app.core.request_context import current_request_context
 from app.core.security import (
     create_access_token,
     hash_password,
@@ -35,22 +36,41 @@ log = get_logger("api.auth")
 # 登录失败锁定（H-8）：窗口 + 次数上限，超限锁一个窗口。
 # 计数依据是 `login_audit_logs`，不另建内存计数器 —— 重启不丢、多进程也准。
 LOCKOUT_WINDOW_MINUTES = 15
+
+# **按「账号 + 来源 IP」计数**（2026-10-09 修）。
+#
+# 为什么改：原来只按 username 数，于是任何人拿 5 次错口令就能把**同事的账号**
+# 锁 15 分钟（可重复）—— 一个把本人挡在门外的拒绝服务，攻击者零成本。
+# 现在同一账号在不同 IP 上各算各的：别人的爆破只锁住"他自己 + 这个账号"这条组合。
 LOCKOUT_MAX_FAILURES = 5
 
+# 单个 IP 的兜底上限（不区分账号）：挡住"用一个 IP 换着用户名撞口令"。
+# 阈值刻意比单账号高，避免共用出口 IP（NAT/跳板）的同事互相误伤。
+LOCKOUT_MAX_FAILURES_PER_IP = 20
 
-async def _recent_failures(db: AsyncSession, username: str) -> int:
+
+def _username_key(username: str | None) -> str:
+    return (username or "").strip()[:64]
+
+
+async def _count_failures(
+    db: AsyncSession, *, username: str | None = None, ip: str | None = None
+) -> int:
+    """窗口内、指定维度上的失败次数（username=None/ip=None 表示不按该维度过滤）。"""
     since = datetime.now(tz=UTC) - timedelta(minutes=LOCKOUT_WINDOW_MINUTES)
-    return (
-        await db.scalar(
-            select(func.count())
-            .select_from(LoginAuditLog)
-            .where(
-                LoginAuditLog.username == (username or "").strip()[:64],
-                LoginAuditLog.success.is_(False),
-                LoginAuditLog.created_at >= since,
-            )
+    stmt = (
+        select(func.count())
+        .select_from(LoginAuditLog)
+        .where(
+            LoginAuditLog.success.is_(False),
+            LoginAuditLog.created_at >= since,
         )
-    ) or 0
+    )
+    if username is not None:
+        stmt = stmt.where(LoginAuditLog.username == username)
+    if ip is not None:
+        stmt = stmt.where(LoginAuditLog.ip == ip)
+    return (await db.scalar(stmt)) or 0
 
 
 def _record_login(
@@ -70,19 +90,27 @@ async def _authenticate(db: AsyncSession, username: str, password: str) -> User:
     """Look up by username OR email, then verify. Raises 401 uniformly.
 
     失败会写一条登录留痕（含 IP/UA），超过阈值改成 429 锁定。
+    锁定按「账号 + 来源 IP」这一对计数，外加单 IP 的兜底上限 ——
+    见 LOCKOUT_MAX_FAILURES 处的说明。
     """
-    failures = await _recent_failures(db, username)
-    if failures >= LOCKOUT_MAX_FAILURES:
+    key = _username_key(username)
+    ip = (current_request_context().ip or None)
+    pair_failures = await _count_failures(db, username=key, ip=ip)
+    ip_failures = await _count_failures(db, ip=ip)
+    if pair_failures >= LOCKOUT_MAX_FAILURES or ip_failures >= LOCKOUT_MAX_FAILURES_PER_IP:
         _record_login(
             db, username=username, user=None, success=False,
-            reason=f"锁定中（{LOCKOUT_WINDOW_MINUTES} 分钟内失败 {failures} 次）",
+            reason=(
+                f"锁定中（{LOCKOUT_WINDOW_MINUTES} 分钟内：本机对该账号失败 "
+                f"{pair_failures} 次、本机合计失败 {ip_failures} 次）"
+            ),
         )
         await db.commit()
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=(
-                f"登录失败次数过多，账号已被临时锁定 {LOCKOUT_WINDOW_MINUTES} 分钟；"
-                "请稍后再试或联系管理员"
+                f"登录失败次数过多，已临时锁定 {LOCKOUT_WINDOW_MINUTES} 分钟。"
+                "若是本人操作，请稍后再试；急用可让管理员重置口令。"
             ),
         )
 

@@ -31,6 +31,35 @@ router = APIRouter(prefix="/users", tags=["用户管理"])
 log = get_logger("api.users")
 
 
+def _guard_admin_role(
+    actor: User, *, current_role: str, incoming_role: str | None
+) -> None:
+    """角色变更里的「管理员闸门」（2026-10-09）。
+
+    ## 为什么要这一道
+
+    `users.py` 原来只拦「改**自己**的角色」，对改**别人**的角色毫无门槛，
+    而 `admin` 是合法取值 —— 在 `core/permissions.py` 的 `can()` 里，
+    admin 对任何已知资源恒定全权。也就是说：
+
+        user.update 权限  ==  可以造出管理员、也能把管理员踢出局
+
+    默认矩阵里 `user.update` 只给 admin，**但系统支持在「系统设置 → 权限矩阵」
+    把这一行授给自定义角色**。一旦授出，那个角色就事实上拥有了"提权为管理员"
+    的能力 —— 权限矩阵上看起来只是开了个子菜单。
+
+    现在口径收紧为：**让某个账号进入或离开 admin 角色，只有 superuser 能做**
+    （`is_superuser` 不属于任何接口可写字段，只能在库里由 DBA 改）。
+    """
+    if actor.is_superuser:
+        return
+    if str(current_role) == Role.ADMIN or str(incoming_role) == Role.ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="只有超级管理员能授予或撤销「管理员」角色",
+        )
+
+
 # ---------------------------------------------------------------------------
 # 组织架构树（2026-10-02：用户管理从平铺列表改成"左树右列表"）
 # ---------------------------------------------------------------------------
@@ -351,6 +380,9 @@ async def create_user(
     if await db.scalar(select(User).where(User.email == body.email)):
         raise HTTPException(status_code=409, detail="邮箱已注册")
 
+    # 建号时也不能"一步到位"造管理员（见 _guard_admin_role）
+    _guard_admin_role(user, current_role="", incoming_role=body.role)
+
     # 挂了部门节点就以节点为准：自由文本的 department 用节点名回填，
     # 保证报表里同一个部门永远同一个写法。
     department_name = body.department
@@ -395,6 +427,8 @@ async def force_logout(
     target = await db.get(User, user_id)
     if target is None:
         raise HTTPException(status_code=404, detail="用户不存在")
+    # 把管理员强制下线 = 让管理员没法干活，同样只有 superuser 能做
+    _guard_admin_role(user, current_role=str(target.role), incoming_role=None)
     target.token_version = int(target.token_version or 0) + 1
     await db.commit()
     log.warning(f"强制下线：{target.username} by {user.username}")
@@ -432,6 +466,9 @@ async def update_user(
         # 不能把自己降权/停用：改完自己就再也进不来了（没人是 superuser 时尤其致命）
         if field == "role" and target.id == user.id and value != target.role:
             raise HTTPException(status_code=400, detail="不能修改自己的角色")
+        # 动「管理员」这个角色（不管方向）只有 superuser 能做 —— 见 _guard_admin_role
+        if field == "role" and str(value) != str(target.role):
+            _guard_admin_role(user, current_role=str(target.role), incoming_role=str(value))
         if field == "status" and target.id == user.id and str(value) != str(target.status):
             raise HTTPException(status_code=400, detail="不能停用自己")
         if field == "email" and value != target.email:
@@ -456,6 +493,8 @@ async def disable_user(
     target = await db.get(User, user_id)
     if not target:
         raise HTTPException(status_code=404, detail="用户不存在")
+    # 停用管理员账号 = 把人锁在门外，同样只有 superuser 能做
+    _guard_admin_role(user, current_role=str(target.role), incoming_role=None)
     target.status = UserStatus.DISABLED
     log.warning(f"停用用户 {target.username} by {user.username}")
 
