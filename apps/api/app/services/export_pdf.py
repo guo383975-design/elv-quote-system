@@ -63,6 +63,12 @@ FONT_ENV_VAR = "QUOTE_EXPORT_FONT"
 # 中文的那一份）。
 FALLBACK_FONT_PATHS: tuple[str, ...] = (
     "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+    "/System/Library/Fonts/STHeiti Medium.ttc",
+    "/System/Library/Fonts/STHeiti Light.ttc",
+    "/System/Library/Fonts/Supplemental/AppleGothic.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+    "/System/Library/Fonts/Supplemental/Arial.ttf",
+    "/Library/Fonts/Arial Unicode.ttf",
     "C:\\Windows\\Fonts\\msyh.ttc",
     "C:\\Windows\\Fonts\\simsun.ttc",
     "C:\\Windows\\Fonts\\simhei.ttf",

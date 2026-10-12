@@ -850,7 +850,7 @@ def test_write_breakdown_to_quote_sets_all_columns():
     )
     b = compute_quote(
         items=[make_item(unit_price="1000.00", install="100.00", cost="700.00")],
-        **base_kwargs(),
+        **base_kwargs(training_fee=Decimal("123.45")),
     )
     write_breakdown_to_quote(quote, b)
 
@@ -859,6 +859,7 @@ def test_write_breakdown_to_quote_sets_all_columns():
     assert quote.auxiliary_total == b.auxiliary_total
     assert quote.design_fee == b.design_fee
     assert quote.warranty_fee == b.warranty_fee
+    assert quote.training_fee == b.training_fee
     assert quote.subtotal_before_tax == b.subtotal_before_tax
     assert quote.mgmt_profit == b.mgmt_profit
     assert quote.tax_amount == b.tax_amount
