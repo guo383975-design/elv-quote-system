@@ -629,6 +629,7 @@ def write_breakdown_to_quote(quote: Quote, b: FeeBreakdown) -> None:
     quote.auxiliary_total = b.auxiliary_total
     quote.design_fee = b.design_fee
     quote.warranty_fee = b.warranty_fee
+    quote.training_fee = b.training_fee
     quote.subtotal_before_tax = b.subtotal_before_tax
     quote.mgmt_profit = b.mgmt_profit
     quote.tax_amount = b.tax_amount
