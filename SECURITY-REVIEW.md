@@ -26,9 +26,11 @@ File: `apps/api/app/api/v1/quotes.py`
 
 The quote recomputation path can aggregate project-level state in Python after loading quote data. This is not a security flaw, but it creates a non-trivial CPU/DB/memory cost that rises with the number of quotes in a project.
 
-Recommendation:
-- prefer database-side aggregation or incremental update paths when doing quote recomputation
-- avoid project-wide Python scans for every compute/update when the changed scope is a single quote
+Action taken:
+- replaced the project-wide `Quote + QuoteItem` eager-load rollup with a database-side aggregation over `quote_items`
+- preserved the same auxiliary-subtotal allocation logic while eliminating the expensive full-project ORM materialization
+
+This reduces the hot path from “load all quote objects and item collections for the project” to “sum directly in SQL per subsystem and quote item window”, which substantially lowers the cost of recomputation on large projects.
 
 ### 2) Operational caveat
 The PDF export path intentionally refuses to silently use a non-CJK font; it will raise an explicit runtime error if no usable Chinese font is available. This is safer than producing garbled output silently, although it means deployment must include a valid font or set `QUOTE_EXPORT_FONT` appropriately.

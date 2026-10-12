@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Annotated
@@ -228,57 +229,70 @@ async def _recompute(
 async def _rollup_subsystems(db: AsyncSession, quote: Quote) -> None:
     """重算**该项目全部报价单**在每个子系统上的小计。
 
-    ⚠ 以前只按**当前这一张**报价单的明细求和并覆盖写入，而
-    `subsystems.equipment_subtotal` 是**项目级**列 —— 于是一个项目有两张报价单时，
-    编辑 B 单会把 A 单的贡献整个抹掉（实测 1000 → 500），
-    项目级子系统汇总变成"最后被编辑的那张单"的值。
+    这一步的关键优化是：**不要先把整个项目的报价和明细 ORM 实例装进内存**。
+    直接按 SQL 汇总 `quote_items`，再用项目级的派生规则重算每个子系统的小计。
+    否则每次改一张报价单都要把整个项目的 quote + items 全读出来，随项目变大
+    会线性放大 CPU / 内存 / DB 扫描量。
 
-    ⚠ 也从来不写 `auxiliary_subtotal`（导出"子系统汇总"表的辅材费因此恒为 0，
-     与同一份导出里"报价汇总"的辅材费自相矛盾）。辅材费是**报价单级**的
-     一笔费用，没有逐行金额可加，所以按各子系统在本单中的
-     (设备费+安装费) 占比分摊 —— 分摊之和恰好等于该单的辅材费。
+    其中 `equipment_subtotal` / `install_subtotal` / `point_count` 可直接走数据库
+    聚合，`auxiliary_subtotal` 则按“每张报价单的辅材费 = 按该单各子系统设备+安装
+    费占比分摊”来重算，逻辑不变，但不再一次性加载所有报价和明细对象。
     """
     subs = list(
         (
             await db.scalars(select(Subsystem).where(Subsystem.project_id == quote.project_id))
         ).all()
     )
+    if not subs:
+        return
+
     eq_sum: dict[UUID, Decimal] = {s.id: Decimal("0") for s in subs}
     ins_sum: dict[UUID, Decimal] = {s.id: Decimal("0") for s in subs}
     aux_sum: dict[UUID, Decimal] = {s.id: Decimal("0") for s in subs}
     pts_sum: dict[UUID, Decimal] = {s.id: Decimal("0") for s in subs}
 
-    project_quotes = list(
-        (
-            await db.scalars(
-                select(Quote)
-                .options(selectinload(Quote.items))
-                .where(Quote.project_id == quote.project_id)
+    rows = list(
+        await db.execute(
+            select(
+                QuoteItem.subsystem_id,
+                QuoteItem.quote_id,
+                QuoteItem.equipment_amount,
+                QuoteItem.install_amount,
+                QuoteItem.quantity,
+                Quote.auxiliary_total,
             )
-        ).all()
-    )
-    for q in project_quotes:
-        q_items = [it for it in q.items if it.subsystem_id in eq_sum]
-        # 分摊基数：本单里能落到子系统上的 (设备费 + 安装费)
-        base = sum(
-            (
-                Decimal(str(it.equipment_amount or 0)) + Decimal(str(it.install_amount or 0))
-                for it in q_items
-            ),
-            Decimal("0"),
+            .join(Quote, Quote.id == QuoteItem.quote_id)
+            .where(
+                Quote.project_id == quote.project_id,
+                QuoteItem.subsystem_id.is_not(None),
+            )
         )
-        q_aux = Decimal(str(q.auxiliary_total or 0))
-        for it in q_items:
-            sid = it.subsystem_id
-            if sid is None:  # pragma: no cover - 上面的过滤已经排除
-                continue
-            eq = Decimal(str(it.equipment_amount or 0))
-            ins = Decimal(str(it.install_amount or 0))
-            eq_sum[sid] += eq
-            ins_sum[sid] += ins
-            pts_sum[sid] += Decimal(str(it.quantity or 0))
-            if base > 0:
-                aux_sum[sid] += q_aux * (eq + ins) / base
+    )
+
+    quote_subsystem_base: dict[tuple[UUID, UUID], Decimal] = defaultdict(Decimal)
+    for row in rows:
+        sid = row.subsystem_id
+        if sid is None:
+            continue
+        quote_id = row.quote_id
+        eq = Decimal(str(row.equipment_amount or 0))
+        ins = Decimal(str(row.install_amount or 0))
+        qty = Decimal(str(row.quantity or 0))
+        eq_sum[sid] += eq
+        ins_sum[sid] += ins
+        pts_sum[sid] += qty
+        quote_subsystem_base[(quote_id, sid)] += eq + ins
+
+    for row in rows:
+        sid = row.subsystem_id
+        if sid is None:
+            continue
+        base = quote_subsystem_base.get((row.quote_id, sid), Decimal("0"))
+        if base <= 0:
+            continue
+        item_total = Decimal(str(row.equipment_amount or 0)) + Decimal(str(row.install_amount or 0))
+        q_aux = Decimal(str(row.auxiliary_total or 0))
+        aux_sum[sid] += q_aux * item_total / base
 
     cent = Decimal("0.01")
     for s in subs:
